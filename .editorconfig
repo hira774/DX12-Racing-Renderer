@@ -1,0 +1,9 @@
+root = true
+
+# HLSLだけ BOMなし UTF-8
+[*.{hlsl,hlsli}]
+charset = utf-8
+
+# C++系は必要なら BOM付き UTF-8
+[*.{cpp,h,hpp}]
+charset = utf-8-bom
