@@ -13,7 +13,7 @@ public:
 	/// @param title ウィンドウタイトル
 	/// @return 登録、作成が成功したか
 	bool Init(const unsigned int width, const unsigned int height, const std::wstring& title);
-	
+
 	/// @brief ウィンドウを表示
 	void Show();
 

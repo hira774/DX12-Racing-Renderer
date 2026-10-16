@@ -12,7 +12,10 @@ Renderer::Renderer(Win32App& winApp) :
 	window_(winApp),
 	rtvDescriptorSize_(0),
 	fenceValue_(0),
-	fenceEvent_(nullptr)
+	frameFenceValues_{},
+	fenceEvent_(nullptr),
+	isTearingSupported_(false),
+	isVSync_(false)
 {
 }
 
@@ -40,6 +43,22 @@ bool Renderer::Init()
 	ComPtr<IDXGIFactory6> factory;
 	hr = CreateDXGIFactory2(factoryFlags, IID_PPV_ARGS(&factory));
 	if (CheckFailed(hr, "Failed to create DXGI factory.")) { return false; }
+
+	// ティアリングに対応しているか
+	BOOL tearingSupported = FALSE;
+	hr = factory->CheckFeatureSupport(
+		DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+		&tearingSupported,
+		sizeof(tearingSupported)
+	);
+	if (FAILED(hr))
+	{
+		Logger::Warn("Failed to check feature support.");
+		tearingSupported = FALSE;
+	}
+
+	// 対応の可否をメンバに保存
+	isTearingSupported_ = static_cast<bool>(tearingSupported);
 
 	// アダプタの列挙
 	ComPtr<IDXGIAdapter1> adapter;
@@ -85,14 +104,17 @@ bool Renderer::Init()
 	if (CheckFailed(hr, "Failed to create command queue.")) { return false; }
 
 	// コマンドアロケータ
-	hr = device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&cmdAllocator_));
-	if (CheckFailed(hr, "Failed to create command allocator.")) { return false; }
+	for (UINT i = 0; i < Game::kFrameCount; ++i)
+	{
+		hr = device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&cmdAllocators_[i]));
+		if (CheckFailed(hr, "Failed to create command allocator.")) { return false; }
+	}
 
 	// コマンドリスト
 	hr = device_->CreateCommandList(
 		0,
 		D3D12_COMMAND_LIST_TYPE_DIRECT,
-		cmdAllocator_.Get(),
+		cmdAllocators_[0].Get(),
 		nullptr,
 		IID_PPV_ARGS(&cmdList_)
 	);
@@ -116,6 +138,16 @@ bool Renderer::Init()
 	swapChainDesc.BufferCount = Game::kFrameCount;
 	// 入れ替えの方式(フリップ)
 	swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+	// 対応している場合のみティアリングを許容する
+	if (isTearingSupported_)
+	{
+		swapChainDesc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+	}
+	else
+	{
+		// 許容しない
+		swapChainDesc.Flags = 0;
+	}
 
 	ComPtr<IDXGISwapChain1> swapChain1;
 	hr = factory->CreateSwapChainForHwnd(
@@ -179,17 +211,19 @@ bool Renderer::Init()
 bool Renderer::Render()
 {
 	HRESULT hr = S_OK;
+	// 描画先の選択 (毎フレーム変わる)
+	UINT frameIndex = swapChain_->GetCurrentBackBufferIndex();
+
+	// このフレームのアロケータの命令が終わるまで待つ
+	if (!WaitForFenceValue(frameFenceValues_[frameIndex])) { return false; }
 
 	/* コマンドの記録を空にする */
 	// 命令が置かれていたメモリを空にして使い回す
-	hr = cmdAllocator_->Reset();
+	hr = cmdAllocators_[frameIndex]->Reset();
 	if (CheckFailed(hr, "Failed to reset command allocator.")) { return false; }
 	// リストを記録中の状態に戻す
-	hr = cmdList_->Reset(cmdAllocator_.Get(), nullptr);
+	hr = cmdList_->Reset(cmdAllocators_[frameIndex].Get(), nullptr);
 	if (CheckFailed(hr, "Failed to reset command list.")) { return false; }
-
-	// 描画先の選択 (毎フレーム変わる)
-	UINT frameIndex = swapChain_->GetCurrentBackBufferIndex();
 
 	// リソースバリアの設定
 	// バックバッファの状態を表示に使用できる状態から描画に使用できる状態に変更する という命令をリストに記録
@@ -235,19 +269,35 @@ bool Renderer::Render()
 	ID3D12CommandList* lists[] = { cmdList_.Get() };
 	cmdQueue_->ExecuteCommandLists(1, lists);
 
+	// 垂直同期 ON の値で初期化
+	UINT syncInterval = 1;
+	UINT presentFlags = 0;
+
+	// 垂直同期を行わない場合
+	if (!isVSync_)
+	{
+		syncInterval = 0;
+		// ティアリングを許可する
+		if (isTearingSupported_) { presentFlags = DXGI_PRESENT_ALLOW_TEARING; }
+	}
+
 	// 画面を入れ替える
-	// 垂直同期 ON
-	hr = swapChain_->Present(1, 0);
+	hr = swapChain_->Present(syncInterval, presentFlags);
 	if (CheckFailed(hr, "Failed to present.")) { return false; }
+
+	// フェンスの値を1増やす
+	++fenceValue_;
+	// コマンドキューにシグナルを追加
+	hr = cmdQueue_->Signal(fence_.Get(), fenceValue_);
+	if (CheckFailed(hr, "Failed to add signal to the command queue.")) { return false; }
+	// このフレームのアロケータを Reset してよくなる値
+	frameFenceValues_[frameIndex] = fenceValue_;
 
 	// 更新されているか確認用
 	{
 		backgroundColor_[0] += 0.005f;
 		if (backgroundColor_[0] > 1.0f) { backgroundColor_[0] = 0.0f; }
 	}
-
-	// GPUの処理待ち
-	if (!WaitForGpu()) { return false; }
 
 	return true;
 }
@@ -286,12 +336,22 @@ bool Renderer::WaitForGpu()
 	HRESULT hr = cmdQueue_->Signal(fence_.Get(), fenceValue_);
 	if (CheckFailed(hr, "Failed to add signal to the command queue.")) { return false; }
 
+	// GPUの処理が終わっていなければCPUを待機
+	if (!WaitForFenceValue(fenceValue_)) { return false; }
+
+	return true;
+}
+
+bool Renderer::WaitForFenceValue(UINT64 value)
+{
+	HRESULT hr = S_OK;
+
 	// まだGPUの処理が終わっていなければ
-	// (GPUが最後に書き込んだ値が、フェンスの値より小さい)
-	if (fence_->GetCompletedValue() < fenceValue_)
+	// (GPUが最後に書き込んだ値がvalueより小さい)
+	if (fence_->GetCompletedValue() < value)
 	{
-		// fenceValue_ の値になったらイベントを知らせる
-		hr = fence_->SetEventOnCompletion(fenceValue_, fenceEvent_);
+		// value の値になったらイベントを知らせる
+		hr = fence_->SetEventOnCompletion(value, fenceEvent_);
 		if (CheckFailed(hr, "Failed to set fence event.")) { return false; }
 
 		// イベントが知らされるまでCPUを止める

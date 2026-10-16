@@ -1,4 +1,7 @@
 ﻿#pragma once
+
+#include <chrono>
+
 // 実体を持つのでincludeする
 #include "Win32App.h"
 #include "Renderer.h"
@@ -52,4 +55,9 @@ private:
 
 	// アプリケーション終了フラグ
 	bool requestExit_;
+
+	// フレームのカウントを始めた時刻
+	std::chrono::steady_clock::time_point fpsStartTime_;
+	// フレームのカウント数
+	unsigned int fpsFrameCount_;
 };

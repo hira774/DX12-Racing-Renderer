@@ -40,6 +40,11 @@ private:
 	/// @return 成功したか
 	bool WaitForGpu();
 
+	/// @brief 指定した値までCPUを待機させる
+	/// @param value この値まで待機
+	/// @return 成功したか
+	bool WaitForFenceValue(UINT64 value);
+
 private:
 	Win32App& window_;
 
@@ -53,7 +58,9 @@ private:
 
 	// コマンドアロケータ
 	// 記録した命令をメモリに置く
-	Microsoft::WRL::ComPtr<ID3D12CommandAllocator> cmdAllocator_;
+	// バックバッファの個数分用意する(GPU が読む間にもう一つのアロケータに CPU が書き込めるようにする)
+	std::array<Microsoft::WRL::ComPtr<ID3D12CommandAllocator>, Game::kFrameCount> cmdAllocators_;
+
 	// コマンドリスト
 	// 命令を記録する
 	Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> cmdList_;
@@ -79,9 +86,19 @@ private:
 	// unsigned long long
 	UINT64 fenceValue_;
 
+	// バックバッファごとに、最後に Signal した値
+	// (GPU がこの値まで進めば、そのアロケータを Reset できる)
+	std::array<UINT64, Game::kFrameCount> frameFenceValues_;
+
 	// フェンスイベント
 	// GPUの処理の完了を待つ
 	HANDLE fenceEvent_;
+
+	// ティアリングに対応しているか
+	bool isTearingSupported_;
+
+	// 垂直同期を使用するか
+	bool isVSync_;
 
 	// 背景色 RGBA
 	float backgroundColor_[4] = { 0.0f, 1.0f, 1.0f, 1.0f };
