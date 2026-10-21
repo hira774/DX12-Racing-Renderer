@@ -3,6 +3,7 @@
 #include <format>
 
 #include "Game.h"
+#include "Logger.h"
 
 Application::Application() :
 	renderer_(winApp_),
@@ -24,13 +25,19 @@ Application& Application::Instance()
 
 bool Application::Init()
 {
+	// コンソールの文字コードを UTF-8 に設定
+	if (SetConsoleOutputCP(CP_UTF8) == 0)
+	{
+		Logger::Warn("Failed to set console output code page.");
+	}
+
 	if (!winApp_.Init(
 		windowWidth_, windowHeight_,
 		Game::kWindowTitle))
 	{
 		return false;
 	}
-	// ウィンドウを表示
+
 	winApp_.Show();
 
 	if (!renderer_.Init())

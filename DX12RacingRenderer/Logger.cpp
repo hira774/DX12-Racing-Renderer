@@ -3,6 +3,8 @@
 #include <Windows.h>
 #include <iostream>
 
+#include "StringUtils.h"
+
 void Logger::Info(const std::string& message)
 {
 	std::string msg = CreateMessage("Info", message);
@@ -42,9 +44,10 @@ void Logger::WriteToConsole(const std::string& message)
 void Logger::WriteToDebug(const std::string& message)
 {
 #ifdef _DEBUG
-	// std::string を渡すので A版の関数を使用する
-	OutputDebugStringA(message.c_str());
-	OutputDebugStringA("\n");
+	// 日本語の文字化けを防ぐために W版を使用する
+	// A版だと Shift_JIS として扱われる
+	OutputDebugStringW(StringUtils::Utf8ToUtf16(message).c_str());
+	OutputDebugStringW(L"\n");
 #endif
 	(void)message;
 }

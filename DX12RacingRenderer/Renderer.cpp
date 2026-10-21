@@ -1,6 +1,9 @@
 ﻿#include "Renderer.h"
 
 #include <format>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 
 #include "Win32App.h"
 #include "Logger.h"
@@ -15,7 +18,10 @@ Renderer::Renderer(Win32App& winApp) :
 	frameFenceValues_{},
 	fenceEvent_(nullptr),
 	isTearingSupported_(false),
-	isVSync_(false)
+	isVSync_(false),
+	vertexBufferView_{},
+	viewport_{},
+	scissorRect_{}
 {
 }
 
@@ -205,6 +211,198 @@ bool Renderer::Init()
 	// GPUの処理が終わるまでCPUを待機させる
 	if (!WaitForGpu()) { return false; }
 
+	// 頂点バッファの作成
+	{
+		Vertex triangle[3] =
+		{
+			{ { 0.0f, 0.5f, 0.0f }, { 0.0f, 1.0f, 0.0f, 1.0f } },
+			{ { 0.5f, 0.0f, 0.0f }, { 0.0f, 0.0f, 1.0f, 1.0f } },
+			{ { -0.5f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
+		};
+
+		D3D12_HEAP_PROPERTIES heapProps = {};
+		// CPUから書き込める
+		heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+		heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+		heapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+		// GPU が1つなら1
+		heapProps.CreationNodeMask = 1;
+		heapProps.VisibleNodeMask = 1;
+
+		// リソースの設定
+		D3D12_RESOURCE_DESC resourceDesc = {};
+		resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+		// バッファでは 0 か 64KB しか使えない (0は既定の値(64KB)を使用する)
+		resourceDesc.Alignment = 0;
+		// 頂点の配列のバイト数を代入 (84Byte)
+		resourceDesc.Width = sizeof(triangle);
+		// バッファでは必ず1
+		resourceDesc.Height = 1;
+		resourceDesc.DepthOrArraySize = 1;
+		resourceDesc.MipLevels = 1;
+		resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
+		// バッファでは1
+		resourceDesc.SampleDesc.Count = 1;
+		// バッファでは0
+		resourceDesc.SampleDesc.Quality = 0;
+		resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+		resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+		// リソースと、リソースを置くためのメモリを作成
+		hr = device_->CreateCommittedResource(
+			&heapProps,
+			D3D12_HEAP_FLAG_NONE,
+			&resourceDesc,
+			D3D12_RESOURCE_STATE_GENERIC_READ,
+			nullptr,
+			IID_PPV_ARGS(&vertexBuffer_)
+		);
+		if (CheckFailed(hr, "Failed to create vertex buffer.")) { return false; }
+
+		// CPU は読まないので空
+		D3D12_RANGE readRange = { 0, 0 };
+
+		void* mappedResource = nullptr;
+		hr = vertexBuffer_->Map(0, &readRange, &mappedResource);
+		if (CheckFailed(hr, "Failed to map vertex buffer.")) { return false; }
+		// 頂点データを GPU から見えるメモリにコピー
+		std::memcpy(mappedResource, triangle, sizeof(triangle));
+		vertexBuffer_->Unmap(0, nullptr);
+		// バッファビューの設定
+		vertexBufferView_.BufferLocation = vertexBuffer_->GetGPUVirtualAddress();
+		vertexBufferView_.StrideInBytes = static_cast<UINT>(sizeof(Vertex));
+		vertexBufferView_.SizeInBytes = static_cast<UINT>(sizeof(triangle));
+	}
+
+	// シェーダーの読み込み
+	std::vector<char> vsCode;
+	std::vector<char> psCode;
+	if (!LoadShaderFile(L"BasicVS.cso", vsCode)) { return false; }
+	if (!LoadShaderFile(L"BasicPS.cso", psCode)) { return false; }
+
+	// ルートシグネチャの作成
+	// シリアライズの結果用
+	ComPtr<ID3DBlob> blob;
+	// エラーメッセージ用
+	ComPtr<ID3DBlob> errorBlob;
+	// ルートシグネチャの設定
+	D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc = {};
+	rootSignatureDesc.NumParameters = 0;
+	rootSignatureDesc.pParameters = nullptr;
+	rootSignatureDesc.NumStaticSamplers = 0;
+	rootSignatureDesc.pStaticSamplers = nullptr;
+	rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+	// ルートシグネチャのシリアライズ
+	hr = D3D12SerializeRootSignature(
+		&rootSignatureDesc,
+		D3D_ROOT_SIGNATURE_VERSION_1,
+		&blob,
+		&errorBlob
+	);
+	if (FAILED(hr))
+	{
+		std::string errMsg = "Failed to serialize root signature.";
+		if (errorBlob)
+		{
+			errMsg += " ";
+			errMsg += static_cast<const char*>(errorBlob->GetBufferPointer());
+		}
+		Logger::Error(errMsg);
+		return false;
+	}
+
+	hr = device_->CreateRootSignature(
+		0,
+		blob->GetBufferPointer(),
+		blob->GetBufferSize(),
+		IID_PPV_ARGS(&rootSignature_)
+	);
+	if (CheckFailed(hr, "Failed to create root signature.")) { return false; }
+
+	// 入力レイアウト
+	// IA が頂点バッファを読むときにどれをシェーダーのどの入力に入れるかを決める
+	D3D12_INPUT_ELEMENT_DESC inputElements[] =
+	{
+		// 位置
+		{
+			"POSITION",						// セマンティクスの名前
+			0,								// セマンティクスの番号
+			DXGI_FORMAT_R32G32B32_FLOAT,	// フォーマット。32ビットの float が3つ
+			0,								// 入力スロット 0 ~ 31
+			0,								// 先頭からこの要素までのオフセット(バイト)
+			D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,	// 入力データクラス。頂点ごとのデータ
+			0
+		},
+		// 色
+		{
+			"COLOR",
+			0,	// 同じ名前を複数使用する場合は変更する
+			DXGI_FORMAT_R32G32B32A32_FLOAT,	// 32ビットの float が4つ
+			0,
+			12,	// 12バイトずらす ( = 32ビット × 3つ)
+			D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
+			0
+		}
+	};
+
+	// パイプラインステートの設定
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+	// 三角形に関係するもの
+	psoDesc.pRootSignature = rootSignature_.Get();
+	psoDesc.VS = { vsCode.data(), vsCode.size() };
+	psoDesc.PS = { psCode.data(), psCode.size() };
+	psoDesc.InputLayout = { inputElements, _countof(inputElements) };
+	psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	psoDesc.NumRenderTargets = 1;
+	psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+	psoDesc.SampleMask = UINT_MAX;
+	psoDesc.SampleDesc.Count = 1;
+	psoDesc.SampleDesc.Quality = 0;
+	// ラスタライザ
+	psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+	psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;	// 裏面は描画しない
+	psoDesc.RasterizerState.FrontCounterClockwise = FALSE;		// 時計回りが表
+	psoDesc.RasterizerState.DepthClipEnable = TRUE;
+	// ラスタライザの残りは 0のまま
+	// ブレンド
+	psoDesc.BlendState.RenderTarget[0].BlendEnable = FALSE;
+	psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+	psoDesc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
+	psoDesc.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ZERO;
+	psoDesc.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+	psoDesc.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+	psoDesc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
+	psoDesc.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+	psoDesc.BlendState.RenderTarget[0].LogicOp = D3D12_LOGIC_OP_NOOP;
+	psoDesc.BlendState.AlphaToCoverageEnable = FALSE;
+	psoDesc.BlendState.IndependentBlendEnable = FALSE;
+	// 深度ステンシル
+	psoDesc.DepthStencilState.DepthEnable = FALSE;
+	psoDesc.DepthStencilState.StencilEnable = FALSE;
+
+	hr = device_->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&pipelineState_));
+	if (CheckFailed(hr, "Failed to create pipeline state.")) { return false; }
+
+	// ビューポートの設定
+	viewport_.TopLeftX = 0.0f;
+	viewport_.TopLeftY = 0.0f;
+	viewport_.Width = static_cast<FLOAT>(window_.GetWindowWidth());
+	viewport_.Height = static_cast<FLOAT>(window_.GetWindowHeight());
+	viewport_.MinDepth = 0.0f;
+	viewport_.MaxDepth = 1.0f;
+
+	// シザー矩形の設定
+	scissorRect_.left = 0;
+	scissorRect_.top = 0;
+	scissorRect_.right = static_cast<LONG>(window_.GetWindowWidth());
+	scissorRect_.bottom = static_cast<LONG>(window_.GetWindowHeight());
+
+
+
+
+
+
 	return true;
 }
 
@@ -253,6 +451,22 @@ bool Renderer::Render()
 	// 単色で塗りつぶす
 	cmdList_->ClearRenderTargetView(rtvHandle, backgroundColor_, 0, nullptr);
 
+	cmdList_->SetGraphicsRootSignature(rootSignature_.Get());
+	cmdList_->SetPipelineState(pipelineState_.Get());
+	// ビューポートを使用する
+	cmdList_->RSSetViewports(1, &viewport_);
+	// シザー矩形を使用する
+	cmdList_->RSSetScissorRects(1, &scissorRect_);
+	// 頂点の並べ方を設定
+	cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	cmdList_->IASetVertexBuffers(0, 1, &vertexBufferView_);
+	// 頂点を何個読むか、それを何個描くか
+	// DrawInstanced(頂点数、インスタンス数、開始頂点、開始インスタンス)
+	cmdList_->DrawInstanced(3, 1, 0, 0);
+
+
+
+
 	// バリア2を記録
 	D3D12_RESOURCE_BARRIER barrier2 = barrier1;
 	barrier2.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;	// 描画に使用できる状態
@@ -292,12 +506,6 @@ bool Renderer::Render()
 	if (CheckFailed(hr, "Failed to add signal to the command queue.")) { return false; }
 	// このフレームのアロケータを Reset してよくなる値
 	frameFenceValues_[frameIndex] = fenceValue_;
-
-	// 更新されているか確認用
-	{
-		backgroundColor_[0] += 0.005f;
-		if (backgroundColor_[0] > 1.0f) { backgroundColor_[0] = 0.0f; }
-	}
 
 	return true;
 }
@@ -359,5 +567,61 @@ bool Renderer::WaitForFenceValue(UINT64 value)
 		WaitForSingleObject(fenceEvent_, INFINITE);
 	}
 
+	return true;
+}
+
+bool Renderer::LoadShaderFile(const std::wstring& fileName, std::vector<char>& shaderCode) const
+{
+	wchar_t exePath[MAX_PATH]{};
+	// exeのパスを取得
+	DWORD length = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+	// 0 が返ってきたなら失敗
+	// MAX_PATH と同じなら途中で切れている
+	if (length == 0 || length == MAX_PATH)
+	{
+		Logger::Error("Failed to get module file name.");
+		return false;
+	}
+	// プログラムファイルのパスを作成
+	std::filesystem::path filePath = std::filesystem::path(exePath).parent_path() / fileName;
+
+	// エラーコードを格納。デフォルト値は 0
+	std::error_code ec;
+	// ファイルの大きさを取得
+	auto fileSize = std::filesystem::file_size(filePath, ec);
+	// エラーが発生した場合
+	if (ec)
+	{
+		Logger::Error(
+			"Failed to get file size. " +
+			StringUtils::Utf16ToUtf8(fileName) +
+			" " + ec.message()
+		);
+		return false;
+	}
+	// 取得した大きさにリサイズ
+	shaderCode.resize(fileSize);
+
+	// ファイルを開く
+	// std::ios::binary 中身をそのまま読む
+	std::ifstream file(filePath, std::ios::binary);
+	// 開けたか確認
+	if (!file)
+	{
+		// ファイルパスに日本語が含まれていた時のために
+		// UTF-16 でファイルパスを取得するし、UTF-8 に変換して Logger に渡す
+		Logger::Error("Failed to open shader file. " + StringUtils::Utf16ToUtf8(filePath.wstring()));
+		return false;
+	}
+	// ファイルを読む
+	file.read(shaderCode.data(), static_cast<std::streamsize>(fileSize));
+	// 指定したバイト数を読めたか確認
+	if (!file)
+	{
+		Logger::Error("Failed to read shader file. " + StringUtils::Utf16ToUtf8(filePath.wstring()));
+		return false;
+	}
+
+	Logger::Info("Loaded shader file: " + StringUtils::Utf16ToUtf8(filePath.wstring()));
 	return true;
 }

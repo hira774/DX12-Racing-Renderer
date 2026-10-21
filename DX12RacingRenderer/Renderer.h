@@ -6,8 +6,16 @@
 
 #include <string>
 #include <array>
+#include <vector>
 
 #include "Game.h"
+
+struct Vertex
+{
+	float position[3] = {};
+	float color[4] = {};
+};
+static_assert(sizeof(Vertex) == 28);
 
 class Win32App;
 class Renderer
@@ -44,6 +52,12 @@ private:
 	/// @param value この値まで待機
 	/// @return 成功したか
 	bool WaitForFenceValue(UINT64 value);
+
+	/// @brief シェーダー(.cso)をロードする
+	/// @param fileName ファイル名
+	/// @param shaderCode 読み込んだバイト列の書き込み先
+	/// @return 成功したか
+	bool LoadShaderFile(const std::wstring& fileName, std::vector<char>& shaderCode) const;
 
 private:
 	Win32App& window_;
@@ -99,6 +113,25 @@ private:
 
 	// 垂直同期を使用するか
 	bool isVSync_;
+
+	// 頂点バッファ
+	Microsoft::WRL::ComPtr<ID3D12Resource> vertexBuffer_;
+
+	// 頂点バッファビュー
+	D3D12_VERTEX_BUFFER_VIEW vertexBufferView_;
+
+	// ルートシグネチャ
+	Microsoft::WRL::ComPtr<ID3D12RootSignature> rootSignature_;
+
+	// パイプラインステート
+	Microsoft::WRL::ComPtr<ID3D12PipelineState> pipelineState_;
+
+	// ビューポート
+	D3D12_VIEWPORT viewport_;
+
+	// シザー矩形
+	D3D12_RECT scissorRect_;
+
 
 	// 背景色 RGBA
 	float backgroundColor_[4] = { 0.0f, 1.0f, 1.0f, 1.0f };
