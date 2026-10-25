@@ -12,4 +12,5 @@ namespace Game
 
 	// バッファー数
 	constexpr unsigned int kFrameCount = 2;
+
 }

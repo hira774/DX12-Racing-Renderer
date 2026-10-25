@@ -11,6 +11,20 @@
 
 using Microsoft::WRL::ComPtr;
 
+namespace
+{
+	// 定数バッファの大きさ(256バイトの倍数に切り上げ)
+	constexpr size_t kConstantBufferSize = (sizeof(SceneConstants) + 255) & ~255;
+
+	/* カメラの設定 */
+	// 視野角 45° (degree)
+	constexpr float kFovAngle = 45.0f;
+	// カメラからニアクリッピング面までの距離
+	constexpr float kNearClipping = 0.1f;
+	// カメラからファークリッピング面までの距離
+	constexpr float kFarClipping = 100.0f;
+}
+
 Renderer::Renderer(Win32App& winApp) :
 	window_(winApp),
 	rtvDescriptorSize_(0),
@@ -20,8 +34,13 @@ Renderer::Renderer(Win32App& winApp) :
 	isTearingSupported_(false),
 	isVSync_(false),
 	vertexBufferView_{},
+	indexBufferView_{},
 	viewport_{},
-	scissorRect_{}
+	scissorRect_{},
+	rotationY_(0.0f),
+	wvpMatrix_{},
+	constantBuffers_{},
+	mappedConstants_{}
 {
 }
 
@@ -195,6 +214,60 @@ bool Renderer::Init()
 		device_->CreateRenderTargetView(backBuffers_[i].Get(), nullptr, rtvHandle);
 	}
 
+	// DSVの作成
+	D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc = {};
+	dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+	dsvHeapDesc.NumDescriptors = 1;
+	dsvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+
+	hr = device_->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&dsvHeap_));
+	if (CheckFailed(hr, "Failed to create DSV descriptor heap.")) { return false; }
+
+	D3D12_HEAP_PROPERTIES depthHeapProps = {};
+	depthHeapProps.Type = D3D12_HEAP_TYPE_DEFAULT;	// GPU専用のメモリ (CPUからは書き込まない)
+	depthHeapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+	depthHeapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+	depthHeapProps.CreationNodeMask = 1;
+	depthHeapProps.VisibleNodeMask = 1;
+
+	// 最適化クリア値
+	// GPUのクリアを速くできる
+	D3D12_CLEAR_VALUE depthClearValue = {};
+	depthClearValue.Format = DXGI_FORMAT_D32_FLOAT;
+	depthClearValue.DepthStencil.Depth = 1.0f;
+	depthClearValue.DepthStencil.Stencil = 0;
+
+	D3D12_RESOURCE_DESC depthResourceDesc = {};
+	depthResourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+	depthResourceDesc.Width = window_.GetWindowWidth();
+	depthResourceDesc.Height = window_.GetWindowHeight();
+	depthResourceDesc.Format = DXGI_FORMAT_D32_FLOAT;
+	depthResourceDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+	depthResourceDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+	depthResourceDesc.Alignment = 0;
+	depthResourceDesc.DepthOrArraySize = 1;
+	depthResourceDesc.MipLevels = 1;
+	depthResourceDesc.SampleDesc.Count = 1;
+	depthResourceDesc.SampleDesc.Quality = 0;
+
+	// リソースとリソースを置くためのメモリを作成
+	hr = device_->CreateCommittedResource(
+		&depthHeapProps,
+		D3D12_HEAP_FLAG_NONE,
+		&depthResourceDesc,
+		D3D12_RESOURCE_STATE_DEPTH_WRITE,	// 深度バッファは描画のたびに書き込む
+		&depthClearValue,
+		IID_PPV_ARGS(&depthBuffer_)
+	);
+	if (CheckFailed(hr, "Failed to create depth buffer.")) { return false; }
+
+	// DSVを作成
+	device_->CreateDepthStencilView(
+		depthBuffer_.Get(),
+		nullptr,
+		dsvHeap_->GetCPUDescriptorHandleForHeapStart()
+	);
+
 	// フェンスの生成
 	hr = device_->CreateFence(fenceValue_, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_));
 	if (CheckFailed(hr, "Failed to create fence.")) { return false; }
@@ -211,15 +284,32 @@ bool Renderer::Init()
 	// GPUの処理が終わるまでCPUを待機させる
 	if (!WaitForGpu()) { return false; }
 
-	// 頂点バッファの作成
+	// 頂点バッファとインデックスバッファの作成
 	{
-		Vertex triangle[3] =
+		Vertex cubeVertices[8] =
 		{
-			{ { 0.0f, 0.5f, 0.0f }, { 0.0f, 1.0f, 0.0f, 1.0f } },
-			{ { 0.5f, 0.0f, 0.0f }, { 0.0f, 0.0f, 1.0f, 1.0f } },
-			{ { -0.5f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
+			{ { -0.5f, 0.5f, -0.5f }, { 1.0f, 0.0f, 0.0f, 1.0f } },		// 0 赤
+			{ { 0.5f, 0.5f, -0.5f }, { 0.0f, 1.0f, 0.0f, 1.0f } },		// 1 緑
+			{ { 0.5f, -0.5f, -0.5f }, { 0.0f, 0.0f, 1.0f, 1.0f } },		// 2 青
+			{ { -0.5f, -0.5f, -0.5f }, { 1.0f, 1.0f, 0.0f, 1.0f } },	// 3 黄
+			{ { -0.5f, 0.5f, 0.5f }, { 1.0f, 0.0f, 1.0f, 1.0f } },		// 4 マゼンタ
+			{ { 0.5f, 0.5f, 0.5f }, { 1.0f, 0.5f, 0.0f, 1.0f } },		// 5 オレンジ
+			{ { 0.5f, -0.5f, 0.5f }, { 0.5f, 0.0f, 1.0f, 1.0f } },		// 6 紫
+			{ { -0.5f, -0.5f, 0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f } },		// 7 白
 		};
 
+		// 外側から見て時計回り (左上, 右上, 右下 / 左上, 右下, 左下)
+		uint16_t cubeIndices[36] =
+		{
+			0, 1, 2, 0, 2, 3,	// 手前 (z = -0.5)
+			5, 4, 7, 5, 7, 6,	// 奥 (z = +0.5)
+			1, 5, 6, 1, 6, 2,	// 右 (x = +0.5)
+			4, 0, 3, 4, 3, 7,	// 左 (x = -0.5)
+			4, 5, 1, 4, 1, 0,	// 上 (y = +0.5)
+			3, 2, 6, 3, 6, 7,	// 下 (y = -0.5)
+		};
+
+		// ヒープの設定
 		D3D12_HEAP_PROPERTIES heapProps = {};
 		// CPUから書き込める
 		heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -234,8 +324,8 @@ bool Renderer::Init()
 		resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
 		// バッファでは 0 か 64KB しか使えない (0は既定の値(64KB)を使用する)
 		resourceDesc.Alignment = 0;
-		// 頂点の配列のバイト数を代入 (84Byte)
-		resourceDesc.Width = sizeof(triangle);
+		// 頂点の配列のバイト数を代入
+		resourceDesc.Width = sizeof(cubeVertices);
 		// バッファでは必ず1
 		resourceDesc.Height = 1;
 		resourceDesc.DepthOrArraySize = 1;
@@ -266,12 +356,82 @@ bool Renderer::Init()
 		hr = vertexBuffer_->Map(0, &readRange, &mappedResource);
 		if (CheckFailed(hr, "Failed to map vertex buffer.")) { return false; }
 		// 頂点データを GPU から見えるメモリにコピー
-		std::memcpy(mappedResource, triangle, sizeof(triangle));
+		std::memcpy(mappedResource, cubeVertices, sizeof(cubeVertices));
 		vertexBuffer_->Unmap(0, nullptr);
 		// バッファビューの設定
 		vertexBufferView_.BufferLocation = vertexBuffer_->GetGPUVirtualAddress();
 		vertexBufferView_.StrideInBytes = static_cast<UINT>(sizeof(Vertex));
-		vertexBufferView_.SizeInBytes = static_cast<UINT>(sizeof(triangle));
+		vertexBufferView_.SizeInBytes = static_cast<UINT>(sizeof(cubeVertices));
+
+		// インデックスバッファの作成
+		// 大きさだけを変えて使い回す
+		resourceDesc.Width = sizeof(cubeIndices);
+		// リソースとリソースを置くためのメモリを作成
+		hr = device_->CreateCommittedResource(
+			&heapProps,
+			D3D12_HEAP_FLAG_NONE,
+			&resourceDesc,
+			D3D12_RESOURCE_STATE_GENERIC_READ,
+			nullptr,
+			IID_PPV_ARGS(&indexBuffer_)
+		);
+		if (CheckFailed(hr, "Failed to create index buffer.")) { return false; }
+
+		void* mappedIndexResource = nullptr;
+		hr = indexBuffer_->Map(0, &readRange, &mappedIndexResource);
+		if (CheckFailed(hr, "Failed to map index buffer.")) { return false; }
+		// 頂点のインデックスを GPU から見えるメモリにコピー
+		std::memcpy(mappedIndexResource, cubeIndices, sizeof(cubeIndices));
+		indexBuffer_->Unmap(0, nullptr);
+		// バッファビューの設定
+		indexBufferView_.BufferLocation = indexBuffer_->GetGPUVirtualAddress();
+		indexBufferView_.SizeInBytes = static_cast<UINT>(sizeof(cubeIndices));
+		indexBufferView_.Format = DXGI_FORMAT_R16_UINT;
+	}
+
+	// 定数バッファの作成(バックバッファの枚数分)
+	for (unsigned int i = 0; i < Game::kFrameCount; ++i)
+	{
+		// ヒープの設定
+		D3D12_HEAP_PROPERTIES heapProps = {};
+		heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+		heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+		heapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+		heapProps.CreationNodeMask = 1;
+		heapProps.VisibleNodeMask = 1;
+
+		// リソースの設定
+		D3D12_RESOURCE_DESC resourceDesc = {};
+		resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+		resourceDesc.Alignment = 0;
+		resourceDesc.Width = kConstantBufferSize;
+		resourceDesc.Height = 1;
+		resourceDesc.DepthOrArraySize = 1;
+		resourceDesc.MipLevels = 1;
+		resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
+		resourceDesc.SampleDesc.Count = 1;
+		resourceDesc.SampleDesc.Quality = 0;
+		resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+		resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+		// リソースと、リソースを置くためのメモリを作成
+		hr = device_->CreateCommittedResource(
+			&heapProps,
+			D3D12_HEAP_FLAG_NONE,
+			&resourceDesc,
+			D3D12_RESOURCE_STATE_GENERIC_READ,
+			nullptr,
+			IID_PPV_ARGS(&constantBuffers_[i])
+		);
+		if (CheckFailed(hr, "Failed to create constant buffer.")) { return false; }
+
+		D3D12_RANGE readRange = { 0, 0 };
+		hr = constantBuffers_[i]->Map(
+			0,
+			&readRange,
+			reinterpret_cast<void**>(&mappedConstants_[i])
+		);
+		if (CheckFailed(hr, "Failed to map constant buffer.")) { return false; }
 	}
 
 	// シェーダーの読み込み
@@ -280,6 +440,13 @@ bool Renderer::Init()
 	if (!LoadShaderFile(L"BasicVS.cso", vsCode)) { return false; }
 	if (!LoadShaderFile(L"BasicPS.cso", psCode)) { return false; }
 
+	// ルートパラメータの作成
+	D3D12_ROOT_PARAMETER rootParameter = {};
+	rootParameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+	rootParameter.Descriptor.ShaderRegister = 0;
+	rootParameter.Descriptor.RegisterSpace = 0;
+	rootParameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;	// 頂点シェーダーからのみ見れる
+
 	// ルートシグネチャの作成
 	// シリアライズの結果用
 	ComPtr<ID3DBlob> blob;
@@ -287,8 +454,8 @@ bool Renderer::Init()
 	ComPtr<ID3DBlob> errorBlob;
 	// ルートシグネチャの設定
 	D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc = {};
-	rootSignatureDesc.NumParameters = 0;
-	rootSignatureDesc.pParameters = nullptr;
+	rootSignatureDesc.NumParameters = 1;			// ルートパラメータの個数
+	rootSignatureDesc.pParameters = &rootParameter;	// ルートパラメータをルートシグネチャにわたす
 	rootSignatureDesc.NumStaticSamplers = 0;
 	rootSignatureDesc.pStaticSamplers = nullptr;
 	rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
@@ -378,8 +545,11 @@ bool Renderer::Init()
 	psoDesc.BlendState.AlphaToCoverageEnable = FALSE;
 	psoDesc.BlendState.IndependentBlendEnable = FALSE;
 	// 深度ステンシル
-	psoDesc.DepthStencilState.DepthEnable = FALSE;
+	psoDesc.DepthStencilState.DepthEnable = TRUE;
+	psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+	psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
 	psoDesc.DepthStencilState.StencilEnable = FALSE;
+	psoDesc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 
 	hr = device_->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&pipelineState_));
 	if (CheckFailed(hr, "Failed to create pipeline state.")) { return false; }
@@ -398,11 +568,6 @@ bool Renderer::Init()
 	scissorRect_.right = static_cast<LONG>(window_.GetWindowWidth());
 	scissorRect_.bottom = static_cast<LONG>(window_.GetWindowHeight());
 
-
-
-
-
-
 	return true;
 }
 
@@ -414,6 +579,16 @@ bool Renderer::Render()
 
 	// このフレームのアロケータの命令が終わるまで待つ
 	if (!WaitForFenceValue(frameFenceValues_[frameIndex])) { return false; }
+
+	/* 定数バッファに WVP を書き込む */
+	// XMFLOAT4X4 を XMMATRIX に変換
+	const auto wvp = DirectX::XMLoadFloat4x4(&wvpMatrix_);
+	// HLSL の cbuffer では行列は列優先なので転置しておく
+	// (平行移動の成分が、DirectXMath は4行目、HLSL では4列目に見える)
+	const auto transposedWvp = DirectX::XMMatrixTranspose(wvp);
+	// 定数バッファに書き込む
+	// XMStoreFloat4x4(書き込み先のアドレス, 転置した行列)
+	DirectX::XMStoreFloat4x4(&mappedConstants_[frameIndex]->wvp, transposedWvp);
 
 	/* コマンドの記録を空にする */
 	// 命令が置かれていたメモリを空にして使い回す
@@ -445,13 +620,31 @@ bool Renderer::Render()
 	// RTVのハンドルを計算
 	D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
 	rtvHandle.ptr += static_cast<SIZE_T>(frameIndex) * rtvDescriptorSize_;
+
+	// DSVのハンドルを作成
+	D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = dsvHeap_->GetCPUDescriptorHandleForHeapStart();
+
 	// 描画の出力先を指定する
-	cmdList_->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+	cmdList_->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
 
 	// 単色で塗りつぶす
 	cmdList_->ClearRenderTargetView(rtvHandle, backgroundColor_, 0, nullptr);
 
+	// 深度を塗りつぶす
+	cmdList_->ClearDepthStencilView(
+		dsvHandle,
+		D3D12_CLEAR_FLAG_DEPTH,
+		1.0f,
+		0,
+		0,
+		nullptr
+	);
+
 	cmdList_->SetGraphicsRootSignature(rootSignature_.Get());
+
+	// ルートパラメータの0番目にこのフレームの定数バッファのGPUアドレスを設定
+	cmdList_->SetGraphicsRootConstantBufferView(0, constantBuffers_[frameIndex]->GetGPUVirtualAddress());
+
 	cmdList_->SetPipelineState(pipelineState_.Get());
 	// ビューポートを使用する
 	cmdList_->RSSetViewports(1, &viewport_);
@@ -460,12 +653,10 @@ bool Renderer::Render()
 	// 頂点の並べ方を設定
 	cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	cmdList_->IASetVertexBuffers(0, 1, &vertexBufferView_);
+	cmdList_->IASetIndexBuffer(&indexBufferView_);
 	// 頂点を何個読むか、それを何個描くか
-	// DrawInstanced(頂点数、インスタンス数、開始頂点、開始インスタンス)
-	cmdList_->DrawInstanced(3, 1, 0, 0);
-
-
-
+	// DrawIndexedInstanced(インデックス数、インスタンス数、開始インデックス、頂点番号に足す数、開始インスタンス)
+	cmdList_->DrawIndexedInstanced(36, 1, 0, 0, 0);
 
 	// バリア2を記録
 	D3D12_RESOURCE_BARRIER barrier2 = barrier1;
@@ -522,6 +713,42 @@ bool Renderer::Terminate()
 	if (CloseHandle(fenceEvent_) == 0) { flag = false; }
 
 	return flag;
+}
+
+void Renderer::Update(float deltaTime)
+{
+	// 回転の速さ (rad/秒)
+	constexpr float kRotationSpeed = 1.57f;
+	// 画面の縦横比 (幅/高さ)
+	float aspectRatio = window_.GetWindowWidthF() / window_.GetWindowHeightF();
+
+	// 回転させる
+	rotationY_ += kRotationSpeed * deltaTime;
+	// 2πを超えたら2πを引く
+	if (rotationY_ > DirectX::XM_2PI)
+	{
+		rotationY_ -= DirectX::XM_2PI;
+	}
+
+	// ワールド行列
+	const auto worldMatrix = DirectX::XMMatrixRotationY(rotationY_);
+	// ビュー行列
+	const auto viewMatrix = DirectX::XMMatrixLookAtLH(
+		DirectX::XMVectorSet(0.0f, 0.0f, -2.0f, 0.0f),
+		DirectX::XMVectorSet(0.0f, 0.0f, 0.0f, 0.0f),
+		DirectX::XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f)
+	);
+	// 射影行列
+	const auto projectionMatrix = DirectX::XMMatrixPerspectiveFovLH(
+		DirectX::XMConvertToRadians(kFovAngle),
+		aspectRatio,
+		kNearClipping,
+		kFarClipping
+	);
+
+	// WVP行列を計算
+	DirectX::XMStoreFloat4x4(&wvpMatrix_, worldMatrix * viewMatrix * projectionMatrix);
+
 }
 
 bool Renderer::CheckFailed(HRESULT hr, const std::string& errMsg) const

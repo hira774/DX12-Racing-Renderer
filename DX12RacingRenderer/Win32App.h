@@ -36,6 +36,18 @@ public:
 		return windowHeight_;
 	}
 
+	/// @brief float のウィンドウ幅を取得
+	float GetWindowWidthF() const
+	{
+		return static_cast<float>(windowWidth_);
+	}
+
+	/// @brief float のウィンドウ高さを取得 
+	float GetWindowHeightF() const
+	{
+		return static_cast<float>(windowHeight_);
+	}
+
 	/// @brief ウィンドウタイトルを変更
 	/// @param title 変更後のウィンドウタイトル
 	void SetWindowTitle(const std::wstring& title)

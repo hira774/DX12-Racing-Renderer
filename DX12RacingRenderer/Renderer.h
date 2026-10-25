@@ -3,6 +3,7 @@
 #include <d3d12.h>
 #include <wrl/client.h>
 #include <dxgi1_6.h>
+#include <DirectXMath.h>
 
 #include <string>
 #include <array>
@@ -16,6 +17,13 @@ struct Vertex
 	float color[4] = {};
 };
 static_assert(sizeof(Vertex) == 28);
+
+// 定数バッファの中身
+// 頂点シェーダーで読む
+struct SceneConstants
+{
+	DirectX::XMFLOAT4X4 wvp;
+};
 
 class Win32App;
 class Renderer
@@ -36,6 +44,11 @@ public:
 	/// @brief 終了処理
 	/// @return 成功したか
 	bool Terminate();
+
+	/// @brief 毎フレームの処理
+	/// @details rotationY_ の値を増やし、 WVP行列を更新する
+	/// @param deltaTime 前のフレームからの経過時間(秒)
+	void Update(float deltaTime);
 
 private:
 	/// @brief 失敗していたらエラーメッセージを出力する
@@ -89,6 +102,12 @@ private:
 	// RTVのディスクリプタ1つ分の大きさ (GPUごとに違う)
 	UINT rtvDescriptorSize_;
 
+	// DSV用のディスクリプタヒープ
+	Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> dsvHeap_;
+
+	// 深度バッファ
+	Microsoft::WRL::ComPtr<ID3D12Resource> depthBuffer_;
+
 	// バックバッファ
 	std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, Game::kFrameCount> backBuffers_;
 
@@ -120,6 +139,12 @@ private:
 	// 頂点バッファビュー
 	D3D12_VERTEX_BUFFER_VIEW vertexBufferView_;
 
+	// インデックスバッファ
+	Microsoft::WRL::ComPtr<ID3D12Resource> indexBuffer_;
+
+	// インデックスバッファビュー
+	D3D12_INDEX_BUFFER_VIEW indexBufferView_;
+
 	// ルートシグネチャ
 	Microsoft::WRL::ComPtr<ID3D12RootSignature> rootSignature_;
 
@@ -132,6 +157,17 @@ private:
 	// シザー矩形
 	D3D12_RECT scissorRect_;
 
+	// 今の角度
+	float rotationY_;
+
+	// ワールド・ビュー・射影をかけた行列
+	DirectX::XMFLOAT4X4 wvpMatrix_;
+
+	// 定数バッファ
+	std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, Game::kFrameCount> constantBuffers_;
+
+	// Map で取得した定数バッファの書き込み先
+	std::array<SceneConstants*, Game::kFrameCount> mappedConstants_;
 
 	// 背景色 RGBA
 	float backgroundColor_[4] = { 0.0f, 1.0f, 1.0f, 1.0f };

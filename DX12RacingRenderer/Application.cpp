@@ -11,6 +11,7 @@ Application::Application() :
 	windowHeight_(Game::kWindowHeight),
 	requestExit_(false),
 	fpsStartTime_(std::chrono::steady_clock::now()),
+	lastFrameTime_(std::chrono::steady_clock::now()),
 	fpsFrameCount_(0)
 {
 }
@@ -52,23 +53,31 @@ void Application::Run()
 {
 	// 初期化処理にかかった時間分、fpsが低く表示されるのを防ぐ
 	fpsStartTime_ = std::chrono::steady_clock::now();
+	lastFrameTime_ = std::chrono::steady_clock::now();
 	fpsFrameCount_ = 0;
 
 	// メインループ
 	while (winApp_.ProcessMessage() && !requestExit_)
 	{
+		// 今の時間を取得
+		auto now = std::chrono::steady_clock::now();
+		// 前のフレームからの時間 (秒)
+		std::chrono::duration<float> elapsed = now - lastFrameTime_;
+		lastFrameTime_ = now;
+
+		// 更新
+		renderer_.Update(elapsed.count());
+
 		// 描画
 		if (!renderer_.Render()) { RequestExit(); }
 
 		// fps計測
 		{
 			++fpsFrameCount_;
-			// 今の時刻を取得
-			auto now = std::chrono::steady_clock::now();
 			// 2つの時刻の差を 秒(double) で受け取る
-			std::chrono::duration<double> elapsed = now - fpsStartTime_;
+			std::chrono::duration<double> fpsElapsed = now - fpsStartTime_;
 			// 数値(秒)
-			double seconds = elapsed.count();
+			double seconds = fpsElapsed.count();
 			// 1秒経過したら
 			if (seconds >= 1.0)
 			{

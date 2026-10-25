@@ -58,6 +58,8 @@ private:
 
 	// フレームのカウントを始めた時刻
 	std::chrono::steady_clock::time_point fpsStartTime_;
+	// 前のフレームの時刻
+	std::chrono::steady_clock::time_point lastFrameTime_;
 	// フレームのカウント数
 	unsigned int fpsFrameCount_;
 };
