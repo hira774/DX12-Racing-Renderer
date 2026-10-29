@@ -2,6 +2,8 @@
 #include <Windows.h>
 #include <string>
 
+#include "Input.h"
+
 class Win32App
 {
 public:
@@ -42,7 +44,7 @@ public:
 		return static_cast<float>(windowWidth_);
 	}
 
-	/// @brief float のウィンドウ高さを取得 
+	/// @brief float のウィンドウ高さを取得
 	float GetWindowHeightF() const
 	{
 		return static_cast<float>(windowHeight_);
@@ -53,6 +55,12 @@ public:
 	void SetWindowTitle(const std::wstring& title)
 	{
 		SetWindowTextW(hwnd_, title.c_str());
+	}
+
+	/// @brief input_をconstで返す
+	const Input& GetInput() const
+	{
+		return input_;
 	}
 
 private:
@@ -70,4 +78,7 @@ private:
 	unsigned int windowWidth_;
 	// 画面の高さ
 	unsigned int windowHeight_;
+
+	// 入力
+	Input input_;
 };

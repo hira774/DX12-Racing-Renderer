@@ -426,3 +426,6 @@ FodyWeavers.xsd
 
 # Official VS Code C# Dev Kit Extension exclusion
 #*.lscache
+
+# ImGui が実行時に作るウィンドウの位置などの設定
+imgui.ini

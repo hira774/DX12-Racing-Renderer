@@ -2,9 +2,10 @@
 
 #include <chrono>
 
-// 実体を持つのでincludeする
+// 実体を持つのでヘッダでincludeする
 #include "Win32App.h"
 #include "Renderer.h"
+#include "Camera.h"
 
 class Application
 {
@@ -28,9 +29,9 @@ public:
 	void RequestExit();
 
 public:
-	/// @brief ウィンドウの幅を取得 
+	/// @brief ウィンドウの幅を取得
 	unsigned int GetWindowWidth() const { return windowWidth_; }
-	/// @brief ウィンドウの高さを取得 
+	/// @brief ウィンドウの高さを取得
 	unsigned int GetWindowHeight() const { return windowHeight_; }
 
 private:
@@ -42,11 +43,16 @@ private:
 	/// @brief コピー代入演算子を禁止する
 	Application& operator=(const Application&) = delete;
 
+	/// @brief デバッグ用の UI を作る
+	void DrawDebugUI();
+
 private:
 	// ウィンドウの作成とメッセージの処理
 	Win32App winApp_;
 	// 描画を行う
 	Renderer renderer_;
+	// カメラ
+	Camera camera_;
 
 	// ウィンドウ幅
 	unsigned int windowWidth_;

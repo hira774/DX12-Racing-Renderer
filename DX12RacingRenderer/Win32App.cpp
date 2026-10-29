@@ -1,6 +1,11 @@
 ﻿#include "Win32App.h"
 
+#include "imgui_impl_win32.h"
+
 #include "Logger.h"
+
+// imgui_impl_win32.h では宣言が消してあるためここで宣言する
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 Win32App::Win32App() :
 	hwnd_(nullptr),
@@ -12,12 +17,37 @@ Win32App::Win32App() :
 
 LRESULT CALLBACK Win32App::WindowProcedure(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
+	// ImGui に入力を渡す。0 以外が返ったら ImGui が処理を済ませたので、ここで返す
+	if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wparam, lparam))
+	{
+		return true;
+	}
+
 	// ウィンドウが破棄されたら呼ばれる
 	if (msg == WM_DESTROY)
 	{
 		PostQuitMessage(0);
 		return 0;
 	}
+
+	// 右ボタンを押している間は、カーソルがウィンドウの外に出てもマウスのメッセージを受け取る
+	if (msg == WM_RBUTTONDOWN)
+	{
+		SetCapture(hwnd);
+	}
+	else if (msg == WM_RBUTTONUP)
+	{
+		ReleaseCapture();
+	}
+
+	// thisの代わり
+	Win32App* self = reinterpret_cast<Win32App*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+
+	if (self != nullptr)
+	{
+		self->input_.HandleMessage(msg, wparam, lparam);
+	}
+
 	// 既定の処理
 	return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
@@ -64,7 +94,15 @@ bool Win32App::Init(const unsigned int width, const unsigned int height, const s
 		return false;
 	}
 
+	// ウィンドウの持ち主のアドレスを覚える
+	// (WindowProcedure で取り出す)
+	SetWindowLongPtrW(hwnd_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+
+	// マウスの RawInput を登録する
+	if (!input_.Init(hwnd_)) { return false; }
+
 	hInstance_ = w.hInstance;
+
 	return true;
 }
 
@@ -76,6 +114,8 @@ void Win32App::Show()
 
 bool Win32App::ProcessMessage()
 {
+	input_.BeginFrame();
+
 	MSG msg = {};
 
 	// メッセージをすべて処理

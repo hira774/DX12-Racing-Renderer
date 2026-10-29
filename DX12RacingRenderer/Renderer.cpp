@@ -5,9 +5,14 @@
 #include <filesystem>
 #include <fstream>
 
+#include "imgui.h"
+#include "imgui_impl_win32.h"
+#include "imgui_impl_dx12.h"
+
 #include "Win32App.h"
 #include "Logger.h"
 #include "StringUtils.h"
+#include "Camera.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -23,6 +28,10 @@ namespace
 	constexpr float kNearClipping = 0.1f;
 	// カメラからファークリッピング面までの距離
 	constexpr float kFarClipping = 100.0f;
+
+	/* ImGui */
+	// ImGui 用の SRV ヒープに置くディスクリプタの数
+	constexpr UINT kSrvHeapSize = 64;
 }
 
 Renderer::Renderer(Win32App& winApp) :
@@ -38,9 +47,11 @@ Renderer::Renderer(Win32App& winApp) :
 	viewport_{},
 	scissorRect_{},
 	rotationY_(0.0f),
+	rotationSpeed_(1.57f),
 	wvpMatrix_{},
 	constantBuffers_{},
-	mappedConstants_{}
+	mappedConstants_{},
+	srvDescriptorSize_(0)
 {
 }
 
@@ -445,7 +456,7 @@ bool Renderer::Init()
 	rootParameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
 	rootParameter.Descriptor.ShaderRegister = 0;
 	rootParameter.Descriptor.RegisterSpace = 0;
-	rootParameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;	// 頂点シェーダーからのみ見れる
+	rootParameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;	// 頂点シェーダーからのみ見える
 
 	// ルートシグネチャの作成
 	// シリアライズの結果用
@@ -568,6 +579,9 @@ bool Renderer::Init()
 	scissorRect_.right = static_cast<LONG>(window_.GetWindowWidth());
 	scissorRect_.bottom = static_cast<LONG>(window_.GetWindowHeight());
 
+	// ImGui の初期化
+	if (!InitImGui()) { return false; }
+
 	return true;
 }
 
@@ -654,9 +668,18 @@ bool Renderer::Render()
 	cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	cmdList_->IASetVertexBuffers(0, 1, &vertexBufferView_);
 	cmdList_->IASetIndexBuffer(&indexBufferView_);
-	// 頂点を何個読むか、それを何個描くか
+	// インデックスを何個読むか、それを何個描くか
 	// DrawIndexedInstanced(インデックス数、インスタンス数、開始インデックス、頂点番号に足す数、開始インスタンス)
 	cmdList_->DrawIndexedInstanced(36, 1, 0, 0, 0);
+
+	/* ImGui を描く */
+	// UI の描画データを作る (CPU の処理)
+	ImGui::Render();
+	// ImGui のフォント SRV があるヒープを設定する
+	ID3D12DescriptorHeap* heaps[] = { srvHeap_.Get() };
+	cmdList_->SetDescriptorHeaps(1, heaps);
+	// 描画データを DX12 の命令にして、コマンドリストに記録する
+	ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), cmdList_.Get());
 
 	// バリア2を記録
 	D3D12_RESOURCE_BARRIER barrier2 = barrier1;
@@ -709,21 +732,25 @@ bool Renderer::Terminate()
 	// 使用中のオブジェクトを解放することはできない
 	if (!WaitForGpu()) { flag = false; }
 
+	// ImGui の終了処理
+	// 作ったのと逆の順
+	ImGui_ImplDX12_Shutdown();
+	ImGui_ImplWin32_Shutdown();
+	ImGui::DestroyContext();
+
 	// 開いている fenceEvent_ を閉じる
 	if (CloseHandle(fenceEvent_) == 0) { flag = false; }
 
 	return flag;
 }
 
-void Renderer::Update(float deltaTime)
+void Renderer::Update(float deltaTime, const Camera& camera)
 {
-	// 回転の速さ (rad/秒)
-	constexpr float kRotationSpeed = 1.57f;
 	// 画面の縦横比 (幅/高さ)
 	float aspectRatio = window_.GetWindowWidthF() / window_.GetWindowHeightF();
 
 	// 回転させる
-	rotationY_ += kRotationSpeed * deltaTime;
+	rotationY_ += rotationSpeed_ * deltaTime;
 	// 2πを超えたら2πを引く
 	if (rotationY_ > DirectX::XM_2PI)
 	{
@@ -733,11 +760,7 @@ void Renderer::Update(float deltaTime)
 	// ワールド行列
 	const auto worldMatrix = DirectX::XMMatrixRotationY(rotationY_);
 	// ビュー行列
-	const auto viewMatrix = DirectX::XMMatrixLookAtLH(
-		DirectX::XMVectorSet(0.0f, 0.0f, -2.0f, 0.0f),
-		DirectX::XMVectorSet(0.0f, 0.0f, 0.0f, 0.0f),
-		DirectX::XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f)
-	);
+	const auto viewMatrix = camera.GetViewMatrix();
 	// 射影行列
 	const auto projectionMatrix = DirectX::XMMatrixPerspectiveFovLH(
 		DirectX::XMConvertToRadians(kFovAngle),
@@ -748,7 +771,23 @@ void Renderer::Update(float deltaTime)
 
 	// WVP行列を計算
 	DirectX::XMStoreFloat4x4(&wvpMatrix_, worldMatrix * viewMatrix * projectionMatrix);
+}
 
+void Renderer::BeginImGuiFrame()
+{
+	ImGui_ImplDX12_NewFrame();
+	ImGui_ImplWin32_NewFrame();
+	ImGui::NewFrame();
+}
+
+void Renderer::SetBackgroundColor(const float* color)
+{
+	for (int i = 0; i < 3; ++i)
+	{
+		backgroundColor_[i] = color[i];
+	}
+	// 3番、アルファ値は 1.0f にする
+	backgroundColor_[3] = 1.0f;
 }
 
 bool Renderer::CheckFailed(HRESULT hr, const std::string& errMsg) const
@@ -809,7 +848,8 @@ bool Renderer::LoadShaderFile(const std::wstring& fileName, std::vector<char>& s
 		Logger::Error("Failed to get module file name.");
 		return false;
 	}
-	// プログラムファイルのパスを作成
+	// .exe と同じフォルダの
+	// シェーダーファイルのパスを作成
 	std::filesystem::path filePath = std::filesystem::path(exePath).parent_path() / fileName;
 
 	// エラーコードを格納。デフォルト値は 0
@@ -836,7 +876,7 @@ bool Renderer::LoadShaderFile(const std::wstring& fileName, std::vector<char>& s
 	if (!file)
 	{
 		// ファイルパスに日本語が含まれていた時のために
-		// UTF-16 でファイルパスを取得するし、UTF-8 に変換して Logger に渡す
+		// UTF-16 でファイルパスを取得し、UTF-8 に変換して Logger に渡す
 		Logger::Error("Failed to open shader file. " + StringUtils::Utf16ToUtf8(filePath.wstring()));
 		return false;
 	}
@@ -850,5 +890,100 @@ bool Renderer::LoadShaderFile(const std::wstring& fileName, std::vector<char>& s
 	}
 
 	Logger::Info("Loaded shader file: " + StringUtils::Utf16ToUtf8(filePath.wstring()));
+
 	return true;
+}
+
+bool Renderer::InitImGui()
+{
+	HRESULT hr = S_OK;
+
+	// SRV 用のディスクリプタヒープの作成 (シェーダーから見える)
+	D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
+	srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+	srvHeapDesc.NumDescriptors = kSrvHeapSize;
+	srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+
+	hr = device_->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&srvHeap_));
+	if (CheckFailed(hr, "Failed to create SRV descriptor heap.")) { return false; }
+
+	srvDescriptorSize_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+	// 空いている番号の一覧を作る
+	// 最後から取り出すので、逆から入れる
+	freeSrvIndices_.reserve(kSrvHeapSize);
+	for (UINT i = kSrvHeapSize; i > 0; --i)
+	{
+		freeSrvIndices_.push_back(i - 1);
+	}
+
+	// ImGui 本体の作成
+	IMGUI_CHECKVERSION();
+	ImGui::CreateContext();
+	ImGui::StyleColorsDark();
+
+	// Win32 のバックエンドの初期化
+	if (!ImGui_ImplWin32_Init(window_.GetHwnd()))
+	{
+		Logger::Error("Failed to initialize ImGui Win32 backend.");
+		return false;
+	}
+
+	// DX12 のバックエンドの初期化
+	ImGui_ImplDX12_InitInfo initInfo = {};
+	initInfo.Device = device_.Get();
+	initInfo.CommandQueue = cmdQueue_.Get();
+	initInfo.NumFramesInFlight = static_cast<int>(Game::kFrameCount);
+	initInfo.RTVFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+	initInfo.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+	// 借りる・返す関数から Renderer に戻るため
+	initInfo.UserData = this;
+	initInfo.SrvDescriptorHeap = srvHeap_.Get();
+	// キャプチャなしのラムダ式は通常の関数ポインタに変換できる
+	initInfo.SrvDescriptorAllocFn = [](
+		ImGui_ImplDX12_InitInfo* info,
+		D3D12_CPU_DESCRIPTOR_HANDLE* cpuHandle,
+		D3D12_GPU_DESCRIPTOR_HANDLE* gpuHandle)
+		{
+			static_cast<Renderer*>(info->UserData)->AllocateSrvDescriptor(cpuHandle, gpuHandle);
+		};
+	initInfo.SrvDescriptorFreeFn = [](
+		ImGui_ImplDX12_InitInfo* info,
+		D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle,
+		D3D12_GPU_DESCRIPTOR_HANDLE)
+		{
+			static_cast<Renderer*>(info->UserData)->FreeSrvDescriptor(cpuHandle);
+		};
+
+	if (!ImGui_ImplDX12_Init(&initInfo))
+	{
+		Logger::Error("Failed to initialize ImGui DX12 backend.");
+		return false;
+	}
+
+	return true;
+}
+
+void Renderer::AllocateSrvDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE* cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE* gpuHandle)
+{
+	// 空いている番号がなければ止める
+	IM_ASSERT(!freeSrvIndices_.empty());
+
+	// 一覧の最後の番号を使う
+	const UINT index = freeSrvIndices_.back();
+	freeSrvIndices_.pop_back();
+
+	// ヒープの先頭 + 番号 × 1つ分の大きさ
+	*cpuHandle = srvHeap_->GetCPUDescriptorHandleForHeapStart();
+	cpuHandle->ptr += static_cast<SIZE_T>(index) * srvDescriptorSize_;
+	*gpuHandle = srvHeap_->GetGPUDescriptorHandleForHeapStart();
+	gpuHandle->ptr += static_cast<UINT64>(index) * srvDescriptorSize_;
+}
+
+void Renderer::FreeSrvDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle)
+{
+	// (ハンドル - ヒープの先頭) ÷ 1つ分の大きさ = 番号
+	const SIZE_T heapStart = srvHeap_->GetCPUDescriptorHandleForHeapStart().ptr;
+	const UINT index = static_cast<UINT>((cpuHandle.ptr - heapStart) / srvDescriptorSize_);
+	freeSrvIndices_.push_back(index);
 }

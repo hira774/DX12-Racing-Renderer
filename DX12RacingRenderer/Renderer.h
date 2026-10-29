@@ -26,6 +26,8 @@ struct SceneConstants
 };
 
 class Win32App;
+class Camera;
+
 class Renderer
 {
 public:
@@ -48,7 +50,35 @@ public:
 	/// @brief 毎フレームの処理
 	/// @details rotationY_ の値を増やし、 WVP行列を更新する
 	/// @param deltaTime 前のフレームからの経過時間(秒)
-	void Update(float deltaTime);
+	/// @param camera 視点のカメラ
+	void Update(float deltaTime, const Camera& camera);
+
+	/// @brief ImGui の新しいフレームを始める
+	/// @details UI の関数 (ImGui::Begin など) を呼ぶ前に、毎フレーム呼ぶ
+	void BeginImGuiFrame();
+
+public:
+	/// @brief 現在の向き (rad)
+	float GetRotationYRad() const { return rotationY_; }
+	/// @brief 現在の向き (degree)
+	float GetRotationYDeg() const { return DirectX::XMConvertToDegrees(rotationY_); }
+
+	/// @brief 回転の速さ (rad/秒)
+	float GetRotationSpeedRad() const { return rotationSpeed_; }
+	/// @brief 回転の速さ (度/秒)
+	float GetRotationSpeedDeg() const { return DirectX::XMConvertToDegrees(rotationSpeed_); }
+	/// @brief 回転の速さを新しい数値(rad)で置き換える
+	/// @param speed 回転の速さ(rad/秒)
+	void SetRotationSpeedRad(float speed) { rotationSpeed_ = speed; }
+	/// @brief 回転の速さを新しい数値(degree)で置き換える
+	/// @param speed 回転の速さ(度/秒)
+	void SetRotationSpeedDeg(float speed) { rotationSpeed_ = DirectX::XMConvertToRadians(speed); }
+
+	/// @brief 背景色を返す
+	const float* GetBackgroundColor() const { return backgroundColor_; }
+	/// @brief 背景色を書き換える
+	/// @param color RGBの3つの値
+	void SetBackgroundColor(const float* color);
 
 private:
 	/// @brief 失敗していたらエラーメッセージを出力する
@@ -72,7 +102,21 @@ private:
 	/// @return 成功したか
 	bool LoadShaderFile(const std::wstring& fileName, std::vector<char>& shaderCode) const;
 
+	/// @brief ImGui の初期化
+	/// @return 成功したか
+	bool InitImGui();
+
+	/// @brief SRV 用のヒープから空いている番号を1つ持ってくる
+	/// @param cpuHandle CPU 側のハンドルの書き込み先
+	/// @param gpuHandle GPU 側のハンドルの書き込み先
+	void AllocateSrvDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE* cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE* gpuHandle);
+
+	/// @brief 番号を返す
+	/// @param cpuHandle 返す番号の CPU 側のハンドル
+	void FreeSrvDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle);
+
 private:
+	// 描画先のウィンドウ
 	Win32App& window_;
 
 	// デバイス
@@ -160,6 +204,9 @@ private:
 	// 今の角度
 	float rotationY_;
 
+	// 回転の速さ (rad/秒)
+	float rotationSpeed_;
+
 	// ワールド・ビュー・射影をかけた行列
 	DirectX::XMFLOAT4X4 wvpMatrix_;
 
@@ -171,4 +218,13 @@ private:
 
 	// 背景色 RGBA
 	float backgroundColor_[4] = { 0.0f, 1.0f, 1.0f, 1.0f };
+
+	// ImGui 用の SRV のディスクリプタヒープ（シェーダーから見える）
+	Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> srvHeap_;
+
+	// SRV のディスクリプタ1つ分の大きさ (GPUごとに違う)
+	UINT srvDescriptorSize_;
+
+	// srvHeap_ の空いている番号の一覧
+	std::vector<UINT> freeSrvIndices_;
 };
