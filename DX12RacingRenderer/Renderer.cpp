@@ -8,11 +8,13 @@
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx12.h"
+#include <DirectXTex.h>
 
 #include "Win32App.h"
 #include "Logger.h"
 #include "StringUtils.h"
 #include "Camera.h"
+#include "ObjLoader.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -29,8 +31,7 @@ namespace
 	// カメラからファークリッピング面までの距離
 	constexpr float kFarClipping = 100.0f;
 
-	/* ImGui */
-	// ImGui 用の SRV ヒープに置くディスクリプタの数
+	// ImGui とテクスチャ用の SRV ヒープに置くディスクリプタの数
 	constexpr UINT kSrvHeapSize = 64;
 }
 
@@ -44,11 +45,16 @@ Renderer::Renderer(Win32App& winApp) :
 	isVSync_(false),
 	vertexBufferView_{},
 	indexBufferView_{},
+	indexCount_(0),
+	textureSrvCpuHandle_{},
+	textureSrvGpuHandle_{},
 	viewport_{},
 	scissorRect_{},
 	rotationY_(0.0f),
 	rotationSpeed_(1.57f),
 	wvpMatrix_{},
+	worldMatrix_{},
+	lightDirection_{ 1.0f, -1.0f, 1.0f },
 	constantBuffers_{},
 	mappedConstants_{},
 	srvDescriptorSize_(0)
@@ -297,28 +303,17 @@ bool Renderer::Init()
 
 	// 頂点バッファとインデックスバッファの作成
 	{
-		Vertex cubeVertices[8] =
-		{
-			{ { -0.5f, 0.5f, -0.5f }, { 1.0f, 0.0f, 0.0f, 1.0f } },		// 0 赤
-			{ { 0.5f, 0.5f, -0.5f }, { 0.0f, 1.0f, 0.0f, 1.0f } },		// 1 緑
-			{ { 0.5f, -0.5f, -0.5f }, { 0.0f, 0.0f, 1.0f, 1.0f } },		// 2 青
-			{ { -0.5f, -0.5f, -0.5f }, { 1.0f, 1.0f, 0.0f, 1.0f } },	// 3 黄
-			{ { -0.5f, 0.5f, 0.5f }, { 1.0f, 0.0f, 1.0f, 1.0f } },		// 4 マゼンタ
-			{ { 0.5f, 0.5f, 0.5f }, { 1.0f, 0.5f, 0.0f, 1.0f } },		// 5 オレンジ
-			{ { 0.5f, -0.5f, 0.5f }, { 0.5f, 0.0f, 1.0f, 1.0f } },		// 6 紫
-			{ { -0.5f, -0.5f, 0.5f }, { 1.0f, 1.0f, 1.0f, 1.0f } },		// 7 白
-		};
+		std::vector<Vertex> vertices;
+		std::vector<uint32_t> indices;
+		if (!LoadObj(L"Assets/Cube.obj", vertices, indices)) { return false; }
+		//if (!LoadObj(L"Assets/Sphere.obj", vertices, indices)) { return false; }
 
-		// 外側から見て時計回り (左上, 右上, 右下 / 左上, 右下, 左下)
-		uint16_t cubeIndices[36] =
-		{
-			0, 1, 2, 0, 2, 3,	// 手前 (z = -0.5)
-			5, 4, 7, 5, 7, 6,	// 奥 (z = +0.5)
-			1, 5, 6, 1, 6, 2,	// 右 (x = +0.5)
-			4, 0, 3, 4, 3, 7,	// 左 (x = -0.5)
-			4, 5, 1, 4, 1, 0,	// 上 (y = +0.5)
-			3, 2, 6, 3, 6, 7,	// 下 (y = -0.5)
-		};
+		// 頂点の中身のバイト数
+		const UINT64 vertexBufferSize = vertices.size() * sizeof(Vertex);
+		// インデックスの中身のバイト数
+		const UINT64 indexBufferSize = indices.size() * sizeof(uint32_t);
+		// 描画するインデックスの数
+		indexCount_ = static_cast<UINT>(indices.size());
 
 		// ヒープの設定
 		D3D12_HEAP_PROPERTIES heapProps = {};
@@ -335,8 +330,8 @@ bool Renderer::Init()
 		resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
 		// バッファでは 0 か 64KB しか使えない (0は既定の値(64KB)を使用する)
 		resourceDesc.Alignment = 0;
-		// 頂点の配列のバイト数を代入
-		resourceDesc.Width = sizeof(cubeVertices);
+		// 頂点データのバイト数を代入
+		resourceDesc.Width = vertexBufferSize;
 		// バッファでは必ず1
 		resourceDesc.Height = 1;
 		resourceDesc.DepthOrArraySize = 1;
@@ -367,16 +362,16 @@ bool Renderer::Init()
 		hr = vertexBuffer_->Map(0, &readRange, &mappedResource);
 		if (CheckFailed(hr, "Failed to map vertex buffer.")) { return false; }
 		// 頂点データを GPU から見えるメモリにコピー
-		std::memcpy(mappedResource, cubeVertices, sizeof(cubeVertices));
+		std::memcpy(mappedResource, vertices.data(), vertexBufferSize);
 		vertexBuffer_->Unmap(0, nullptr);
 		// バッファビューの設定
 		vertexBufferView_.BufferLocation = vertexBuffer_->GetGPUVirtualAddress();
 		vertexBufferView_.StrideInBytes = static_cast<UINT>(sizeof(Vertex));
-		vertexBufferView_.SizeInBytes = static_cast<UINT>(sizeof(cubeVertices));
+		vertexBufferView_.SizeInBytes = static_cast<UINT>(vertexBufferSize);
 
 		// インデックスバッファの作成
 		// 大きさだけを変えて使い回す
-		resourceDesc.Width = sizeof(cubeIndices);
+		resourceDesc.Width = indexBufferSize;
 		// リソースとリソースを置くためのメモリを作成
 		hr = device_->CreateCommittedResource(
 			&heapProps,
@@ -392,16 +387,19 @@ bool Renderer::Init()
 		hr = indexBuffer_->Map(0, &readRange, &mappedIndexResource);
 		if (CheckFailed(hr, "Failed to map index buffer.")) { return false; }
 		// 頂点のインデックスを GPU から見えるメモリにコピー
-		std::memcpy(mappedIndexResource, cubeIndices, sizeof(cubeIndices));
+		std::memcpy(mappedIndexResource, indices.data(), indexBufferSize);
 		indexBuffer_->Unmap(0, nullptr);
 		// バッファビューの設定
 		indexBufferView_.BufferLocation = indexBuffer_->GetGPUVirtualAddress();
-		indexBufferView_.SizeInBytes = static_cast<UINT>(sizeof(cubeIndices));
-		indexBufferView_.Format = DXGI_FORMAT_R16_UINT;
+		indexBufferView_.SizeInBytes = static_cast<UINT>(indexBufferSize);
+		indexBufferView_.Format = DXGI_FORMAT_R32_UINT;
 	}
 
+	// テクスチャの読み込み
+	if (!LoadTexture(L"Assets/Checker.png")) { return false; }
+
 	// 定数バッファの作成(バックバッファの枚数分)
-	for (unsigned int i = 0; i < Game::kFrameCount; ++i)
+	for (UINT i = 0; i < Game::kFrameCount; ++i)
 	{
 		// ヒープの設定
 		D3D12_HEAP_PROPERTIES heapProps = {};
@@ -452,11 +450,42 @@ bool Renderer::Init()
 	if (!LoadShaderFile(L"BasicPS.cso", psCode)) { return false; }
 
 	// ルートパラメータの作成
-	D3D12_ROOT_PARAMETER rootParameter = {};
-	rootParameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-	rootParameter.Descriptor.ShaderRegister = 0;
-	rootParameter.Descriptor.RegisterSpace = 0;
-	rootParameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;	// 頂点シェーダーからのみ見える
+	D3D12_ROOT_PARAMETER rootParameters[2] = {};
+	// CBV
+	rootParameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+	rootParameters[0].Descriptor.ShaderRegister = 0;
+	rootParameters[0].Descriptor.RegisterSpace = 0;
+	rootParameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;	// すべてのシェーダーから見える
+
+	// SRVのテーブルの中身の形を作成
+	D3D12_DESCRIPTOR_RANGE srvRange = {};
+	srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;	// SRV の範囲
+	srvRange.NumDescriptors = 1;		// 1個
+	srvRange.BaseShaderRegister = 0;	// t0
+	srvRange.RegisterSpace = 0;
+	srvRange.OffsetInDescriptorsFromTableStart = 0;			// テーブルの先頭から
+	// SRV用のルートパラメータ
+	rootParameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+	rootParameters[1].DescriptorTable.NumDescriptorRanges = 1;
+	rootParameters[1].DescriptorTable.pDescriptorRanges = &srvRange;
+	rootParameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;	// ピクセルシェーダーから見える
+
+	// 静的サンプラを作成
+	D3D12_STATIC_SAMPLER_DESC staticSampler = {};
+	staticSampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+	// UVの値が 0~1 の範囲外の時、繰り返す
+	staticSampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+	staticSampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+	staticSampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+	// 使用しない
+	staticSampler.MaxAnisotropy = 0;
+	staticSampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+	staticSampler.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+	staticSampler.MinLOD = 0.0f;
+	staticSampler.MaxLOD = D3D12_FLOAT32_MAX;
+	// シェーダーの設定
+	staticSampler.ShaderRegister = 0;	// s0
+	staticSampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;	// ピクセルシェーダーから見える
 
 	// ルートシグネチャの作成
 	// シリアライズの結果用
@@ -465,10 +494,10 @@ bool Renderer::Init()
 	ComPtr<ID3DBlob> errorBlob;
 	// ルートシグネチャの設定
 	D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc = {};
-	rootSignatureDesc.NumParameters = 1;			// ルートパラメータの個数
-	rootSignatureDesc.pParameters = &rootParameter;	// ルートパラメータをルートシグネチャにわたす
-	rootSignatureDesc.NumStaticSamplers = 0;
-	rootSignatureDesc.pStaticSamplers = nullptr;
+	rootSignatureDesc.NumParameters = _countof(rootParameters);	// ルートパラメータの個数
+	rootSignatureDesc.pParameters = rootParameters;	// ルートパラメータをルートシグネチャにわたす
+	rootSignatureDesc.NumStaticSamplers = 1;		// 静的サンプラの個数
+	rootSignatureDesc.pStaticSamplers = &staticSampler;
 	rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
 	// ルートシグネチャのシリアライズ
@@ -512,13 +541,23 @@ bool Renderer::Init()
 			D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,	// 入力データクラス。頂点ごとのデータ
 			0
 		},
-		// 色
+		// 法線
 		{
-			"COLOR",
+			"NORMAL",
 			0,	// 同じ名前を複数使用する場合は変更する
-			DXGI_FORMAT_R32G32B32A32_FLOAT,	// 32ビットの float が4つ
+			DXGI_FORMAT_R32G32B32_FLOAT,	// 32ビットの float が3つ
 			0,
 			12,	// 12バイトずらす ( = 32ビット × 3つ)
+			D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
+			0
+		},
+		// UV
+		{
+			"TEXCOORD",
+			0,
+			DXGI_FORMAT_R32G32_FLOAT,	// 32ビットの float が2つ
+			0,
+			24, // POSITION + NORMAL 分のオフセット
 			D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
 			0
 		}
@@ -526,7 +565,7 @@ bool Renderer::Init()
 
 	// パイプラインステートの設定
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-	// 三角形に関係するもの
+	// シェーダーと入出力の形式
 	psoDesc.pRootSignature = rootSignature_.Get();
 	psoDesc.VS = { vsCode.data(), vsCode.size() };
 	psoDesc.PS = { psCode.data(), psCode.size() };
@@ -582,6 +621,23 @@ bool Renderer::Init()
 	// ImGui の初期化
 	if (!InitImGui()) { return false; }
 
+	// SRV を作る
+	// ヒープの空いている番号を探す
+	AllocateSrvDescriptor(&textureSrvCpuHandle_, &textureSrvGpuHandle_);
+
+	// SRV の設定
+	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+	srvDesc.Format = texture_->GetDesc().Format;
+	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;	// RGBAをそのまま渡す
+	srvDesc.Texture2D.MostDetailedMip = 0;
+	srvDesc.Texture2D.MipLevels = 1;	// ミップマップは無し
+	device_->CreateShaderResourceView(
+		texture_.Get(),
+		&srvDesc,
+		textureSrvCpuHandle_
+	);
+
 	return true;
 }
 
@@ -594,15 +650,25 @@ bool Renderer::Render()
 	// このフレームのアロケータの命令が終わるまで待つ
 	if (!WaitForFenceValue(frameFenceValues_[frameIndex])) { return false; }
 
-	/* 定数バッファに WVP を書き込む */
+	/* 定数バッファに WVP・worldMatrix・lightDirection を書き込む */
 	// XMFLOAT4X4 を XMMATRIX に変換
 	const auto wvp = DirectX::XMLoadFloat4x4(&wvpMatrix_);
+	const auto world = DirectX::XMLoadFloat4x4(&worldMatrix_);
+
 	// HLSL の cbuffer では行列は列優先なので転置しておく
 	// (平行移動の成分が、DirectXMath は4行目、HLSL では4列目に見える)
 	const auto transposedWvp = DirectX::XMMatrixTranspose(wvp);
+	const auto transposedWorld = DirectX::XMMatrixTranspose(world);
+
 	// 定数バッファに書き込む
 	// XMStoreFloat4x4(書き込み先のアドレス, 転置した行列)
+	// wvp行列
 	DirectX::XMStoreFloat4x4(&mappedConstants_[frameIndex]->wvp, transposedWvp);
+	// world行列
+	DirectX::XMStoreFloat4x4(&mappedConstants_[frameIndex]->world, transposedWorld);
+	// 光の向き
+	// ベクトルなので転置しなくていい
+	mappedConstants_[frameIndex]->lightDirection = lightDirection_;
 
 	/* コマンドの記録を空にする */
 	// 命令が置かれていたメモリを空にして使い回す
@@ -654,10 +720,18 @@ bool Renderer::Render()
 		nullptr
 	);
 
+	// テクスチャと ImGui の SRV があるヒープを設定する
+	ID3D12DescriptorHeap* heaps[] = { srvHeap_.Get() };
+	cmdList_->SetDescriptorHeaps(1, heaps);
+
+	// ルートシグネチャを設定
 	cmdList_->SetGraphicsRootSignature(rootSignature_.Get());
 
 	// ルートパラメータの0番目にこのフレームの定数バッファのGPUアドレスを設定
 	cmdList_->SetGraphicsRootConstantBufferView(0, constantBuffers_[frameIndex]->GetGPUVirtualAddress());
+
+	// ルートパラメータの1番目にテクスチャの SRVテーブルを設定
+	cmdList_->SetGraphicsRootDescriptorTable(1, textureSrvGpuHandle_);
 
 	cmdList_->SetPipelineState(pipelineState_.Get());
 	// ビューポートを使用する
@@ -670,14 +744,11 @@ bool Renderer::Render()
 	cmdList_->IASetIndexBuffer(&indexBufferView_);
 	// インデックスを何個読むか、それを何個描くか
 	// DrawIndexedInstanced(インデックス数、インスタンス数、開始インデックス、頂点番号に足す数、開始インスタンス)
-	cmdList_->DrawIndexedInstanced(36, 1, 0, 0, 0);
+	cmdList_->DrawIndexedInstanced(indexCount_, 1, 0, 0, 0);
 
 	/* ImGui を描く */
 	// UI の描画データを作る (CPU の処理)
 	ImGui::Render();
-	// ImGui のフォント SRV があるヒープを設定する
-	ID3D12DescriptorHeap* heaps[] = { srvHeap_.Get() };
-	cmdList_->SetDescriptorHeaps(1, heaps);
 	// 描画データを DX12 の命令にして、コマンドリストに記録する
 	ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), cmdList_.Get());
 
@@ -771,6 +842,8 @@ void Renderer::Update(float deltaTime, const Camera& camera)
 
 	// WVP行列を計算
 	DirectX::XMStoreFloat4x4(&wvpMatrix_, worldMatrix * viewMatrix * projectionMatrix);
+	// ワールド行列をメンバ変数に保存
+	DirectX::XMStoreFloat4x4(&worldMatrix_, worldMatrix);
 }
 
 void Renderer::BeginImGuiFrame()
@@ -788,6 +861,14 @@ void Renderer::SetBackgroundColor(const float* color)
 	}
 	// 3番、アルファ値は 1.0f にする
 	backgroundColor_[3] = 1.0f;
+}
+
+void Renderer::SetLightDirection(const DirectX::XMFLOAT3& direction)
+{
+	// シェーダー側での 0除算を防ぐ
+	// ベクトルの大きさの2乗としきい値の2乗を比べる
+	if (direction.x * direction.x + direction.y * direction.y + direction.z * direction.z < 0.001f * 0.001f) { return; }
+	lightDirection_ = direction;
 }
 
 bool Renderer::CheckFailed(HRESULT hr, const std::string& errMsg) const
@@ -960,6 +1041,184 @@ bool Renderer::InitImGui()
 		Logger::Error("Failed to initialize ImGui DX12 backend.");
 		return false;
 	}
+
+	return true;
+}
+
+bool Renderer::LoadTexture(const std::wstring& fileName)
+{
+	HRESULT hr = S_OK;
+
+	// exe のフォルダを基準に画像ファイルのパスを作る
+	wchar_t exePath[MAX_PATH] = {};
+	DWORD length = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+	if (length == 0 || length == MAX_PATH)
+	{
+		Logger::Error("Failed to get module file name.");
+		return false;
+	}
+	std::filesystem::path filePath = std::filesystem::path(exePath).parent_path() / fileName;
+
+	// 画像を CPU のメモリに読み込む
+	// FORCE_RGB: BGR の並びも R8G8B8A8 で読む。
+	// IGNORE_SRGB: SRGBのフォーマットにしない
+	DirectX::TexMetadata metadata = {};
+	DirectX::ScratchImage scratchImage;
+	hr = DirectX::LoadFromWICFile(
+		filePath.c_str(),
+		DirectX::WIC_FLAGS_FORCE_RGB | DirectX::WIC_FLAGS_IGNORE_SRGB,
+		&metadata,
+		scratchImage
+	);
+	if (CheckFailed(hr, "Failed to load texture file. " + StringUtils::Utf16ToUtf8(fileName))) { return false; }
+
+	// デバッグ用
+	Logger::Info(std::format(
+		"Texture: {} x {}, format {}",
+		metadata.width, metadata.height,
+		static_cast<int>(metadata.format)
+	));
+
+	// ヒープの設定
+	D3D12_HEAP_PROPERTIES heapProps = {};
+	// GPU 専用のメモリ。CPU からは Map できない
+	heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+	heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+	heapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+	heapProps.CreationNodeMask = 1;
+	heapProps.VisibleNodeMask = 1;
+
+	// テクスチャの設定
+	D3D12_RESOURCE_DESC textureDesc = {};
+	textureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+	textureDesc.Alignment = 0;
+	// 幅と高さ (ピクセル数)
+	textureDesc.Width = static_cast<UINT64>(metadata.width);
+	textureDesc.Height = static_cast<UINT>(metadata.height);
+	textureDesc.DepthOrArraySize = 1;
+	// ミップマップ無し
+	textureDesc.MipLevels = 1;
+	textureDesc.Format = metadata.format;
+	textureDesc.SampleDesc.Count = 1;
+	textureDesc.SampleDesc.Quality = 0;
+	// メモリ上の並びはドライバ側が決める
+	textureDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+	textureDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+	// テクスチャを作る。最初の状態はコピー先 (COPY_DEST)
+	hr = device_->CreateCommittedResource(
+		&heapProps,
+		D3D12_HEAP_FLAG_NONE,
+		&textureDesc,
+		D3D12_RESOURCE_STATE_COPY_DEST,
+		nullptr,
+		IID_PPV_ARGS(&texture_)
+	);
+	if (CheckFailed(hr, "Failed to create texture.")) { return false; }
+
+	// コピーするときの形(フットプリント)を GPU に合わせて求める
+	D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
+	UINT numRows = 0;
+	UINT64 rowSizeInBytes = 0;
+	UINT64 uploadBufferSize = 0;
+	device_->GetCopyableFootprints(
+		&textureDesc,
+		0,					// 最初のサブリソース
+		1,					// サブリソースの数
+		0,					// バッファの先頭からのずれ
+		&footprint,			// 置き方 (行の間隔 RowPitch など)
+		&numRows,			// 行の数
+		&rowSizeInBytes,	// 1行の中身のバイト数
+		&uploadBufferSize	// アップロード用バッファに必要なバイト数
+	);
+
+	// アップロード用バッファ
+	// CPU が書ける、GPU が読める
+	D3D12_HEAP_PROPERTIES uploadHeapProps = heapProps;
+	uploadHeapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+	D3D12_RESOURCE_DESC uploadDesc = {};
+	uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+	uploadDesc.Alignment = 0;
+	uploadDesc.Width = uploadBufferSize;
+	uploadDesc.Height = 1;
+	uploadDesc.DepthOrArraySize = 1;
+	uploadDesc.MipLevels = 1;
+	uploadDesc.Format = DXGI_FORMAT_UNKNOWN;
+	uploadDesc.SampleDesc.Count = 1;
+	uploadDesc.SampleDesc.Quality = 0;
+	uploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+	uploadDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+	// GPU へのコピーが終わったら捨てる
+	ComPtr<ID3D12Resource> uploadBuffer;
+	hr = device_->CreateCommittedResource(
+		&uploadHeapProps,
+		D3D12_HEAP_FLAG_NONE,
+		&uploadDesc,
+		D3D12_RESOURCE_STATE_GENERIC_READ,
+		nullptr,
+		IID_PPV_ARGS(&uploadBuffer)
+	);
+	if (CheckFailed(hr, "Failed to create texture upload buffer.")) { return false; }
+
+	// 画像のピクセルを 1行ずつアップロード用バッファにコピーする
+	// 画像: rowPitch, バッファ: 256 バイトの倍数の RowPitch で行の間隔が違うので
+	// 画像のデータをまとめてコピーすることはできない
+	const DirectX::Image* image = scratchImage.GetImage(0, 0, 0);
+	D3D12_RANGE readRange = { 0, 0 };
+	void* mapped = nullptr;
+	hr = uploadBuffer->Map(0, &readRange, &mapped);
+	if (CheckFailed(hr, "Failed to map texture upload buffer.")) { return false; }
+	uint8_t* dstStart = static_cast<uint8_t*>(mapped) + footprint.Offset;
+	for (UINT row = 0; row < numRows; ++row)
+	{
+		std::memcpy(
+			dstStart + row * footprint.Footprint.RowPitch,	// コピー先の行の先頭
+			image->pixels + row * image->rowPitch,			// コピー元の行の先頭
+			static_cast<size_t>(rowSizeInBytes)				// 1行の中身だけ
+		);
+	}
+	uploadBuffer->Unmap(0, nullptr);
+
+	// コピーの命令を記録する
+	// GPU はまだ何もしていないので、0番のアロケータを使うことができる
+	hr = cmdAllocators_[0]->Reset();
+	if (CheckFailed(hr, "Failed to reset command allocator.")) { return false; }
+	hr = cmdList_->Reset(cmdAllocators_[0].Get(), nullptr);
+	if (CheckFailed(hr, "Failed to reset command list.")) { return false; }
+
+	// コピー先: テクスチャのサブリソース
+	D3D12_TEXTURE_COPY_LOCATION dst = {};
+	dst.pResource = texture_.Get();
+	dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+	dst.SubresourceIndex = 0;
+
+	// コピー元: アップロード用バッファ (フットプリントで並びを伝える)
+	D3D12_TEXTURE_COPY_LOCATION src = {};
+	src.pResource = uploadBuffer.Get();
+	src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+	src.PlacedFootprint = footprint;
+
+	// dstの (0, 0, 0) の位置(先頭)に src 全体をコピーする
+	cmdList_->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+	// コピー先 → ピクセルシェーダーが読む状態にする
+	D3D12_RESOURCE_BARRIER barrier = {};
+	barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+	barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+	barrier.Transition.pResource = texture_.Get();
+	barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+	barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+	barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+	cmdList_->ResourceBarrier(1, &barrier);
+
+	hr = cmdList_->Close();
+	if (CheckFailed(hr, "Failed to close command list.")) { return false; }
+
+	ID3D12CommandList* lists[] = { cmdList_.Get() };
+	cmdQueue_->ExecuteCommandLists(1, lists);
+	if (!WaitForGpu()) { return false; }
 
 	return true;
 }

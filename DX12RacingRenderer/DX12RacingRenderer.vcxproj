@@ -52,7 +52,7 @@
       <LanguageStandard>stdcpp20</LanguageStandard>
       <TreatWarningAsError>true</TreatWarningAsError>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalIncludeDirectories>$(ProjectDir)..\External\imgui;$(ProjectDir)..\External\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\External\imgui;$(ProjectDir)..\External\imgui\backends;$(ProjectDir)..\External\DirectXTex;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -82,7 +82,7 @@
       <LanguageStandard>stdcpp20</LanguageStandard>
       <TreatWarningAsError>true</TreatWarningAsError>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalIncludeDirectories>$(ProjectDir)..\External\imgui;$(ProjectDir)..\External\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\External\imgui;$(ProjectDir)..\External\imgui\backends;$(ProjectDir)..\External\DirectXTex;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -104,9 +104,38 @@
     <ClCompile Include="Camera.cpp" />
     <ClCompile Include="Input.cpp" />
     <ClCompile Include="Logger.cpp" />
+    <ClCompile Include="ObjLoader.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="Renderer.cpp" />
     <ClCompile Include="Win32App.cpp" />
+  </ItemGroup>
+  <!-- DirectXTex may2026（External/DirectXTex。変更せずに使う）。CPU で読み込み・変換する部分だけを登録する -->
+  <!-- 登録しないもの: GPU での圧縮（BCDirectCompute、DirectXTexCompressGPU。シェーダのビルドが要る）、DirectXTexD3D11、DirectXTexD3D12（d3dx12.h を使う。転送は自分で書く） -->
+  <ItemGroup>
+    <ClCompile Include="..\External\DirectXTex\BC.cpp" />
+    <ClCompile Include="..\External\DirectXTex\BC4BC5.cpp" />
+    <ClCompile Include="..\External\DirectXTex\BC6HBC7.cpp" />
+    <ClCompile Include="..\External\DirectXTex\DirectXTexCompress.cpp" />
+    <ClCompile Include="..\External\DirectXTex\DirectXTexConvert.cpp" />
+    <ClCompile Include="..\External\DirectXTex\DirectXTexDDS.cpp" />
+    <ClCompile Include="..\External\DirectXTex\DirectXTexFlipRotate.cpp" />
+    <ClCompile Include="..\External\DirectXTex\DirectXTexHDR.cpp" />
+    <ClCompile Include="..\External\DirectXTex\DirectXTexImage.cpp" />
+    <ClCompile Include="..\External\DirectXTex\DirectXTexMipmaps.cpp" />
+    <ClCompile Include="..\External\DirectXTex\DirectXTexMisc.cpp" />
+    <ClCompile Include="..\External\DirectXTex\DirectXTexNormalMaps.cpp" />
+    <ClCompile Include="..\External\DirectXTex\DirectXTexPMAlpha.cpp" />
+    <ClCompile Include="..\External\DirectXTex\DirectXTexResize.cpp" />
+    <ClCompile Include="..\External\DirectXTex\DirectXTexTGA.cpp" />
+    <ClCompile Include="..\External\DirectXTex\DirectXTexUtil.cpp" />
+    <ClCompile Include="..\External\DirectXTex\DirectXTexWIC.cpp" />
+    <ClInclude Include="..\External\DirectXTex\BC.h" />
+    <ClInclude Include="..\External\DirectXTex\DDS.h" />
+    <ClInclude Include="..\External\DirectXTex\DirectXTex.h" />
+    <ClInclude Include="..\External\DirectXTex\DirectXTexP.h" />
+    <ClInclude Include="..\External\DirectXTex\filters.h" />
+    <ClInclude Include="..\External\DirectXTex\scoped.h" />
+    <None Include="..\External\DirectXTex\DirectXTex.inl" />
   </ItemGroup>
   <!-- Dear ImGui v1.93.0（External/imgui。変更せずに使う） -->
   <ItemGroup>
@@ -132,6 +161,7 @@
     <ClInclude Include="Game.h" />
     <ClInclude Include="Input.h" />
     <ClInclude Include="Logger.h" />
+    <ClInclude Include="ObjLoader.h" />
     <ClInclude Include="Renderer.h" />
     <ClInclude Include="StringUtils.h" />
     <ClInclude Include="Win32App.h" />
@@ -146,6 +176,18 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="Basic.hlsli" />
+  </ItemGroup>
+  <!-- モデルやテクスチャ。ビルド時に exe と同じフォルダの Assets\ へコピーする -->
+  <ItemGroup>
+    <CopyFileToFolders Include="Assets\Cube.obj">
+      <DestinationFolders>$(OutDir)Assets</DestinationFolders>
+    </CopyFileToFolders>
+    <CopyFileToFolders Include="Assets\Checker.png">
+      <DestinationFolders>$(OutDir)Assets</DestinationFolders>
+    </CopyFileToFolders>
+    <CopyFileToFolders Include="Assets\Sphere.obj">
+      <DestinationFolders>$(OutDir)Assets</DestinationFolders>
+    </CopyFileToFolders>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

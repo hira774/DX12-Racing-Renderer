@@ -14,15 +14,20 @@
 struct Vertex
 {
 	float position[3] = {};
-	float color[4] = {};
+	float normal[3] = {};
+	float uv[2] = {};
 };
-static_assert(sizeof(Vertex) == 28);
+// Vertex の大きさが 32バイトではなかったらビルドエラーになる
+static_assert(sizeof(Vertex) == 32);
 
 // 定数バッファの中身
-// 頂点シェーダーで読む
+// 頂点シェーダーとピクセルシェーダーで読む
 struct SceneConstants
 {
 	DirectX::XMFLOAT4X4 wvp;
+	DirectX::XMFLOAT4X4 world;
+	DirectX::XMFLOAT3 lightDirection;
+	float padding;	// HLSL の16バイト単位に合わせるための詰め物
 };
 
 class Win32App;
@@ -48,7 +53,7 @@ public:
 	bool Terminate();
 
 	/// @brief 毎フレームの処理
-	/// @details rotationY_ の値を増やし、 WVP行列を更新する
+	/// @details rotationY_ を進め、WVP行列とワールド行列を更新する
 	/// @param deltaTime 前のフレームからの経過時間(秒)
 	/// @param camera 視点のカメラ
 	void Update(float deltaTime, const Camera& camera);
@@ -80,6 +85,12 @@ public:
 	/// @param color RGBの3つの値
 	void SetBackgroundColor(const float* color);
 
+	/// @brief 光の向きを返す
+	const DirectX::XMFLOAT3& GetLightDirection() const { return lightDirection_; }
+	/// @brief 光の向きを書き換える
+	/// @param direction 光が進む向き (ワールド)
+	void SetLightDirection(const DirectX::XMFLOAT3& direction);
+
 private:
 	/// @brief 失敗していたらエラーメッセージを出力する
 	/// @param hr 調べる先の関数の戻り値
@@ -105,6 +116,11 @@ private:
 	/// @brief ImGui の初期化
 	/// @return 成功したか
 	bool InitImGui();
+
+	/// @brief 画像ファイルを読み込み、テクスチャのリソースを作る
+	/// @param fileName exe のフォルダから見た画像のパス
+	/// @return 成功したか
+	bool LoadTexture(const std::wstring& fileName);
 
 	/// @brief SRV 用のヒープから空いている番号を1つ持ってくる
 	/// @param cpuHandle CPU 側のハンドルの書き込み先
@@ -189,6 +205,18 @@ private:
 	// インデックスバッファビュー
 	D3D12_INDEX_BUFFER_VIEW indexBufferView_;
 
+	// 描画するインデックスの数
+	UINT indexCount_;
+
+	// テクスチャ (DEFAULT のヒープ。シェーダーが読む画像の本体)
+	Microsoft::WRL::ComPtr<ID3D12Resource> texture_;
+
+	// SRV を書く場所 (CPU側)
+	D3D12_CPU_DESCRIPTOR_HANDLE textureSrvCpuHandle_;
+
+	// 描画で渡す場所 (GPU側)
+	D3D12_GPU_DESCRIPTOR_HANDLE textureSrvGpuHandle_;
+
 	// ルートシグネチャ
 	Microsoft::WRL::ComPtr<ID3D12RootSignature> rootSignature_;
 
@@ -210,6 +238,12 @@ private:
 	// ワールド・ビュー・射影をかけた行列
 	DirectX::XMFLOAT4X4 wvpMatrix_;
 
+	// ワールド行列
+	DirectX::XMFLOAT4X4 worldMatrix_;
+
+	// 光が進む向き (ワールド空間)
+	DirectX::XMFLOAT3 lightDirection_;
+
 	// 定数バッファ
 	std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, Game::kFrameCount> constantBuffers_;
 
@@ -219,7 +253,7 @@ private:
 	// 背景色 RGBA
 	float backgroundColor_[4] = { 0.0f, 1.0f, 1.0f, 1.0f };
 
-	// ImGui 用の SRV のディスクリプタヒープ（シェーダーから見える）
+	// ImGui とテクスチャの SRV 用のディスクリプタヒープ（シェーダーから見える）
 	Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> srvHeap_;
 
 	// SRV のディスクリプタ1つ分の大きさ (GPUごとに違う)

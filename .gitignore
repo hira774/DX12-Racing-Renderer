@@ -101,6 +101,8 @@ StyleCopReport.xml
 *.ilk
 *.meta
 *.obj
+# Assets のモデル（OBJ）は含める
+!**/Assets/**/*.obj
 *.idb
 *.iobj
 *.pch

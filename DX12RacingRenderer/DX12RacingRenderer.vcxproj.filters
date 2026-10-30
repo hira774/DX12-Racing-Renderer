@@ -16,6 +16,12 @@
     <Filter Include="ImGui">
       <UniqueIdentifier>{6B1C2E7A-3F4D-4E8B-9A51-2C7D8E9F0A13}</UniqueIdentifier>
     </Filter>
+    <Filter Include="DirectXTex">
+      <UniqueIdentifier>{3D2A9C41-7B6E-4F05-8C1D-5E9A0B7F2C64}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Assets">
+      <UniqueIdentifier>{A8E4F2B0-1C93-4D6A-B57E-0F3C8D2961AB}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Application.cpp">
@@ -28,6 +34,9 @@
       <Filter>ソース ファイル</Filter>
     </ClCompile>
     <ClCompile Include="Logger.cpp">
+      <Filter>ソース ファイル</Filter>
+    </ClCompile>
+    <ClCompile Include="ObjLoader.cpp">
       <Filter>ソース ファイル</Filter>
     </ClCompile>
     <ClCompile Include="main.cpp">
@@ -54,6 +63,9 @@
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
     <ClInclude Include="Logger.h">
+      <Filter>ヘッダー ファイル</Filter>
+    </ClInclude>
+    <ClInclude Include="ObjLoader.h">
       <Filter>ヘッダー ファイル</Filter>
     </ClInclude>
     <ClInclude Include="Renderer.h">
@@ -125,5 +137,88 @@
     <ClInclude Include="..\External\imgui\backends\imgui_impl_win32.h">
       <Filter>ImGui</Filter>
     </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\External\DirectXTex\BC.cpp">
+      <Filter>DirectXTex</Filter>
+    </ClCompile>
+    <ClCompile Include="..\External\DirectXTex\BC4BC5.cpp">
+      <Filter>DirectXTex</Filter>
+    </ClCompile>
+    <ClCompile Include="..\External\DirectXTex\BC6HBC7.cpp">
+      <Filter>DirectXTex</Filter>
+    </ClCompile>
+    <ClCompile Include="..\External\DirectXTex\DirectXTexCompress.cpp">
+      <Filter>DirectXTex</Filter>
+    </ClCompile>
+    <ClCompile Include="..\External\DirectXTex\DirectXTexConvert.cpp">
+      <Filter>DirectXTex</Filter>
+    </ClCompile>
+    <ClCompile Include="..\External\DirectXTex\DirectXTexDDS.cpp">
+      <Filter>DirectXTex</Filter>
+    </ClCompile>
+    <ClCompile Include="..\External\DirectXTex\DirectXTexFlipRotate.cpp">
+      <Filter>DirectXTex</Filter>
+    </ClCompile>
+    <ClCompile Include="..\External\DirectXTex\DirectXTexHDR.cpp">
+      <Filter>DirectXTex</Filter>
+    </ClCompile>
+    <ClCompile Include="..\External\DirectXTex\DirectXTexImage.cpp">
+      <Filter>DirectXTex</Filter>
+    </ClCompile>
+    <ClCompile Include="..\External\DirectXTex\DirectXTexMipmaps.cpp">
+      <Filter>DirectXTex</Filter>
+    </ClCompile>
+    <ClCompile Include="..\External\DirectXTex\DirectXTexMisc.cpp">
+      <Filter>DirectXTex</Filter>
+    </ClCompile>
+    <ClCompile Include="..\External\DirectXTex\DirectXTexNormalMaps.cpp">
+      <Filter>DirectXTex</Filter>
+    </ClCompile>
+    <ClCompile Include="..\External\DirectXTex\DirectXTexPMAlpha.cpp">
+      <Filter>DirectXTex</Filter>
+    </ClCompile>
+    <ClCompile Include="..\External\DirectXTex\DirectXTexResize.cpp">
+      <Filter>DirectXTex</Filter>
+    </ClCompile>
+    <ClCompile Include="..\External\DirectXTex\DirectXTexTGA.cpp">
+      <Filter>DirectXTex</Filter>
+    </ClCompile>
+    <ClCompile Include="..\External\DirectXTex\DirectXTexUtil.cpp">
+      <Filter>DirectXTex</Filter>
+    </ClCompile>
+    <ClCompile Include="..\External\DirectXTex\DirectXTexWIC.cpp">
+      <Filter>DirectXTex</Filter>
+    </ClCompile>
+    <ClInclude Include="..\External\DirectXTex\BC.h">
+      <Filter>DirectXTex</Filter>
+    </ClInclude>
+    <ClInclude Include="..\External\DirectXTex\DDS.h">
+      <Filter>DirectXTex</Filter>
+    </ClInclude>
+    <ClInclude Include="..\External\DirectXTex\DirectXTex.h">
+      <Filter>DirectXTex</Filter>
+    </ClInclude>
+    <ClInclude Include="..\External\DirectXTex\DirectXTexP.h">
+      <Filter>DirectXTex</Filter>
+    </ClInclude>
+    <ClInclude Include="..\External\DirectXTex\filters.h">
+      <Filter>DirectXTex</Filter>
+    </ClInclude>
+    <ClInclude Include="..\External\DirectXTex\scoped.h">
+      <Filter>DirectXTex</Filter>
+    </ClInclude>
+    <None Include="..\External\DirectXTex\DirectXTex.inl">
+      <Filter>DirectXTex</Filter>
+    </None>
+    <CopyFileToFolders Include="Assets\Cube.obj">
+      <Filter>Assets</Filter>
+    </CopyFileToFolders>
+    <CopyFileToFolders Include="Assets\Checker.png">
+      <Filter>Assets</Filter>
+    </CopyFileToFolders>
+    <CopyFileToFolders Include="Assets\Sphere.obj">
+      <Filter>Assets</Filter>
+    </CopyFileToFolders>
   </ItemGroup>
 </Project>

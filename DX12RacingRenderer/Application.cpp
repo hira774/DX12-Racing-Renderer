@@ -1,6 +1,7 @@
 ﻿#include "Application.h"
 
 #include <format>
+#include <objbase.h>
 
 #include "imgui.h"
 
@@ -34,6 +35,15 @@ bool Application::Init()
 	if (SetConsoleOutputCP(CP_UTF8) == 0)
 	{
 		Logger::Warn("Failed to set console output code page.");
+	}
+
+	// COM の初期化
+	// DirectXTex の関数より先に初期化する
+	HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+	if (FAILED(hr))
+	{
+		Logger::Error("Failed to initialize COM.");
+		return false;
 	}
 
 	if (!winApp_.Init(
@@ -122,6 +132,8 @@ void Application::Run()
 void Application::Terminate()
 {
 	renderer_.Terminate();
+	// COM の終了処理
+	CoUninitialize();
 }
 
 void Application::RequestExit()
@@ -182,6 +194,12 @@ void Application::DrawDebugUI()
 	if (ImGui::ColorEdit3("Background", color))
 	{
 		renderer_.SetBackgroundColor(color);
+	}
+	// 光の向き
+	auto dir = renderer_.GetLightDirection();
+	if (ImGui::SliderFloat3("Light Direction", &dir.x, -1.0f, 1.0f, "%.2f"))
+	{
+		renderer_.SetLightDirection(dir);
 	}
 
 	// ウィンドウを終了
